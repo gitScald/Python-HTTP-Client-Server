@@ -33,7 +33,6 @@ if __name__ == '__main__':
                         help='Specifies the timeout value')
 
     args = parser.parse_args()
-    print(args)
     server = httpc_lib.HTTPClient(rqst_type=args.rqst_type,
                                   verbose=args.v,
                                   output=args.o,
