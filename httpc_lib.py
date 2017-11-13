@@ -7,6 +7,7 @@ BUFFER_SIZE = 1024
 DIVIDER = '-' * 80
 ENCODING = 'utf-8'
 HTTP_VERSION = 'HTTP/1.1'
+ROUTER_PORT = 3000
 
 CMD = {'GET': 'GET',
        'POST': 'POST'}
@@ -71,7 +72,7 @@ class Request:
             # Build default headers
             self.headers = dict()
             self.headers['Accept: '] = '*/*'
-            self.headers['Connection: '] = 'keep-alive'
+            self.headers['Connection: '] = 'close'
             self.headers['Host: '] = str(self.host)
 
             # Build necessary POST headers if not present
@@ -97,7 +98,7 @@ class HTTPClient:
                  data_inline=None,
                  data_file=None,
                  url='',
-                 timeout=5):
+                 timeout=None):
         self.rqst_type = rqst_type
         self.verbose = verbose
         self.output = output
@@ -111,8 +112,8 @@ class HTTPClient:
         self.server_port = 80
         self.server = None
         self.socket = None
-        self.connect = None
-        self.timeout = timeout
+        self.timeout = 5 if timeout is None else timeout
+        self.router = ()
 
         # Initialize client
         self.init()
@@ -131,9 +132,10 @@ class HTTPClient:
 
         if ip is not None:
             self.server_addr = ip.group('host')
-            self.debug('Server IP address resolved to: ' + self.server_addr)
-            self.server_port = ip.group('port')
-            self.debug('Server port number: ' + self.server_port)
+            self.debug('Server IP address resolved to: ' + str(self.server_addr))
+            self.server_port = int(ip.group('port'))
+            self.debug('Server port number: ' + str(self.server_port))
+            self.server = (self.server_addr, self.server_port)
 
         else:
             url = re.match(REGEX['URL_PORT'], self.url)
@@ -152,24 +154,28 @@ class HTTPClient:
                     try:
                         host_ip = socket.gethostbyname(host_name)
                         self.debug('Server IP address resolved to: ' + host_ip)
-                        host_port = 80
+                        host_port = 8080
                         if url.group('port') is not None:
                             host_port = url.group('port')
                         self.debug('Server port number: ' + str(host_port))
                         self.server_addr = host_ip
                         self.server_port = host_port
-                        self.server = (self.server_addr, self.server_port)
+                        self.server = (self.server_addr, str(self.server_port))
                     except socket.gaierror:
                         self.debug('Could not resolve host name: ' + host_name)
 
             else:
-                self.debug('Invalid address format: ' + self.server_addr)
+                self.debug('Invalid address format: ' + str(self.server_addr))
                 valid = False
 
         if valid:
+            self.router = (self.server_addr, 3000)
+
             self.run()
 
     def build_rqst(self):
+        rqst = None
+
         data_type = ''
         data = ''
         if self.data_file is not None:
@@ -185,7 +191,6 @@ class HTTPClient:
 
         else:
             # Generate request
-            rqst = None
             path_args = url['path']
             if url['args'] is not None:
                 path_args += '?' + url['args']
@@ -199,7 +204,7 @@ class HTTPClient:
                                data=data)
             else:
                 rqst = Request(rqst_type=self.rqst_type,
-                               host=self.server,
+                               host=self.server_addr,
                                path=path_args,
                                headers=self.headers,
                                data_type=data_type,
@@ -208,33 +213,49 @@ class HTTPClient:
         return rqst
 
     def send_rqst(self, rqst):
-        # Initialize socket and send request
-        # self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # self.socket.sendto(rqst, self.server)
-        # self.socket.sendto(pkt, self.server)
-        # self.socket.settimeout(self.timeout)
+        # Initialize socket and send request to router
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        pkt = packet.UDPPacket(pkt_type=1,
+                               seq_num=1,
+                               peer_ip=self.server_addr,
+                               peer_port=self.server_port,
+                               data=str(rqst))
+        self.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
-        # TCP test
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect(self.server)
-        self.socket.sendall(str(rqst).encode(ENCODING))
-        print(self.socket.recv(BUFFER_SIZE).decode(ENCODING))
+        # Send packet to router
+        self.socket.sendto(pkt.to_bytes(), self.router)
+        self.debug('Packet sent to router at: ' + str(self.router[0])
+                   + ':' + str(self.router[1])
+                   + ' (size = ' + str(pkt.len()) + ')')
 
     def recv(self):
         # Wait for a reply from the server
-        resp = self.socket.recvfrom(BUFFER_SIZE)
-        if resp is not None:
-            if self.output is not None:
-                with open(self.output, 'a') as file:
-                    file.write(self.output)
+        resp, origin = self.socket.recvfrom(BUFFER_SIZE)
+        if self.output is not None:
+            with open(self.output, 'a') as file:
+                file.write(origin)
+                file.write(resp)
 
-        return resp
+        return resp, origin
 
     def run(self):
         # Build request
         rqst = self.build_rqst()
-        self.debug('Built request:\r\n\r\n' + str(rqst), True)
 
-        self.send_rqst(rqst)
-        resp = str(self.recv()).decode(ENCODING)
-        self.debug('Received response:\r\n\r\n' + str(resp), True)
+        # Handle timeout
+        try:
+            self.send_rqst(rqst)
+            self.socket.settimeout(self.timeout)
+
+            # Receive server response
+            resp, origin = self.recv()
+            self.debug('Received response:\r\n\r\n' + resp, True)
+            self.debug('Origin: ' + origin)
+
+        except socket.timeout:
+            self.debug('Connection timed out')
+
+        finally:
+            # Close connection
+            self.debug('Closing connection')
+            self.socket.close()
