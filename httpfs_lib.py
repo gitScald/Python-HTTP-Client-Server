@@ -85,8 +85,6 @@ class FileServer:
         self.debug('Host name: ' + self.host + ':' + str(self.port))
 
         self.sock.bind((self.host, self.port))
-        self.sock.settimeout(self.timeout)
-
         self.debug('Server awaiting packets...')
 
         # Provide minimal output if logging is disabled
@@ -99,18 +97,21 @@ class FileServer:
         while self.active:
             try:
                 try:
+                    self.sock.settimeout(self.timeout)
+
                     # Receive packet
                     rqst, origin = self.sock.recvfrom(BUFFER_SIZE)
-                    pkt = packet.UDPPacket.from_bytes(raw=rqst)
+                    if rqst is not None:
+                        pkt = packet.UDPPacket.from_bytes(raw=rqst)
 
-                    name = 'Connection-' + str(len(self.threads))
+                        name = 'Connection-' + str(len(self.threads))
 
-                    # Each new connection is handled by a separate thread
-                    t = threading.Thread(name=name, target=self.handle,
-                                         args=(pkt, origin))
-                    self.threads.append(t)
-                    t.start()
-                    self.debug('Active connections: ' + str(len(self.threads)))
+                        # Each new connection is handled by a separate thread
+                        t = threading.Thread(name=name, target=self.handle,
+                                             args=(pkt, origin))
+                        self.threads.append(t)
+                        t.start()
+                        self.debug('Active connections: ' + str(len(self.threads)))
 
                 # Do nothing on timeout
                 except socket.timeout:
@@ -133,10 +134,11 @@ class FileServer:
             seq_num = pkt.seq_num
             peer_ip = pkt.peer_ip
             peer_port = pkt.peer_port
+            dest = (peer_ip, peer_port)
             rqst = pkt.data
 
             # Parse client request data
-            self.parse(rqst, origin)
+            self.parse(origin, dest, rqst)
 
             # Close connection
             self.threads.remove(threading.current_thread())
@@ -144,13 +146,13 @@ class FileServer:
         except Exception as e:
             self.debug(e)
 
-    def parse(self, rqst, origin):
+    def parse(self, origin, dest, rqst):
         lines = rqst.split('\r\n')
 
         # Only handle HTTP version 1.1
         if HTTP_VERSION not in lines[0]:
             self.debug('Handling wrong HTTP request')
-            self.bad_http(origin)
+            self.bad_http(origin, dest)
 
         path = lines[0].split()[1]
         # Catalog the path as a potential lock
@@ -166,15 +168,15 @@ class FileServer:
                 and (not path.startswith('/public'))\
                 and (os.path.join(self.cwd, 'public') not in self.wdir):
             self.debug('Handling forbidden request')
-            self.forbidden(origin)
+            self.forbidden(origin, dest)
 
         elif CMD['GET'] in lines[0]:
             self.debug('Handling GET request')
-            self.get(origin, rqst)
+            self.get(origin, dest, rqst)
 
         elif CMD['POST'] in lines[0]:
             self.debug('Handling POST request')
-            self.post(origin, rqst)
+            self.post(origin, dest, rqst)
 
         else:
             self.debug('Unrecognized request format: ' + rqst[0])
@@ -188,7 +190,7 @@ class FileServer:
 
         return headers
 
-    def bad_http(self, origin):
+    def bad_http(self, origin, dest):
         content = ''
         with open(FILES['BAD_HTTP'], 'r') as file:
             content += file.read()
@@ -196,9 +198,9 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['BAD_HTML'], content, headers)
-        self.send(origin, resp)
+        self.send(origin, dest, resp)
 
-    def forbidden(self, origin):
+    def forbidden(self, origin, dest):
         content = ''
         with open(FILES['FORBIDDEN'], 'r') as file:
             content += file.read()
@@ -206,9 +208,9 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['FORBIDDEN'], content, headers)
-        self.send(origin, resp)
+        self.send(origin, dest, resp)
 
-    def not_allowed(self, origin):
+    def not_allowed(self, origin, dest):
         content = ''
         with open(FILES['NOT_ALLOWED'], 'r') as file:
             content += file.read()
@@ -216,9 +218,9 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['NOT_ALLOWED'], content, headers)
-        self.send(origin, resp)
+        self.send(origin, dest, resp)
 
-    def not_found(self, origin):
+    def not_found(self, origin, dest):
         content = ''
         with open(FILES['NOT_FOUND'], 'r') as file:
             content += file.read()
@@ -226,9 +228,9 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['NOT_FOUND'], content, headers)
-        self.send(origin, resp)
+        self.send(origin, dest, resp)
 
-    def stop(self, origin):
+    def stop(self, origin, dest):
         content = ''
         with open(FILES['STOP'], 'r') as file:
             content += file.read()
@@ -236,7 +238,7 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['OK'], content, headers)
-        self.send(origin, resp)
+        self.send(origin, dest, resp)
 
         # Interrupt main thread
         _thread.interrupt_main()
@@ -300,7 +302,7 @@ class FileServer:
         else:
             return None
 
-    def get(self, origin, rqst):
+    def get(self, origin, dest, rqst):
         lines = rqst.split('\r\n')
         path = lines[0].split()[1]
 
@@ -314,7 +316,7 @@ class FileServer:
 
             # Form request and send
             resp = Response(STATUS_CODES['OK'], content, headers)
-            self.send(origin, resp)
+            self.send(origin, dest, resp)
 
         else:
             # Check if a query is part of the request
@@ -337,7 +339,7 @@ class FileServer:
                     # Close server if path points to 'public/stop.html'
                     if FILES['STOP'] in path:
                         self.debug('Received stop request')
-                        self.stop(origin)
+                        self.stop(origin, dest)
                         return
 
                     # Add query arguments to output
@@ -370,13 +372,13 @@ class FileServer:
                 # Form request and send
                 headers += 'Content-Length: ' + str(len(content)) + '\r\n'
                 resp = Response(STATUS_CODES['OK'], content, headers)
-                self.send(origin, resp)
+                self.send(origin, dest, resp)
 
             # If path is not valid, form not found response
             else:
-                self.not_found(origin)
+                self.not_found(origin, dest)
 
-    def post(self, origin, rqst):
+    def post(self, origin, dest, rqst):
         lines = rqst.split('\r\n')
         path = lines[0].split()[1]
 
@@ -384,7 +386,7 @@ class FileServer:
 
         # Deny access to already-existing files (except dummy post.html)
         if any(FILE in path for FILE in FILES.values()):
-            self.not_allowed(origin)
+            self.not_allowed(origin, dest)
             return
 
         else:
@@ -452,29 +454,28 @@ class FileServer:
             if created:
                 # Form request and send
                 resp = Response(STATUS_CODES['CREATED'], content, headers)
-                self.send(origin, resp)
+                self.send(origin, dest, resp)
 
             # If file already existed, reply with status 200
             else:
                 # Form request and send
                 resp = Response(STATUS_CODES['OK'], content, headers)
-                self.send(origin, resp)
+                self.send(origin, dest, resp)
 
-    def send(self, origin, resp):
+    def send(self, origin, dest, resp):
         # Generate packet
         pkt = packet.UDPPacket(pkt_type=1,
                                seq_num=1,
-                               peer_ip=origin[0],
-                               peer_port=origin[1],
+                               peer_ip=dest[0],
+                               peer_port=dest[1],
                                data=Response.to_str(resp))
-                               # data=Response.to_str(resp).encode(ENCODING))
         FileServer.debug('Formed packet:\r\n' + DIVIDER + '\r\n' + str(pkt), True)
 
         # Send packet
         self.sock.sendto(pkt.to_bytes(), origin)
         self.debug('Packet sent to router at: ' + str(origin[0])
                    + ':' + str(origin[1])
-                   + ' (size = ' + str(pkt.len()) + ')')
+                   + ' (size = ' + str(len(pkt.data)) + ')')
 
     def exit(self):
         # Make sure all other threads finish processing their requests

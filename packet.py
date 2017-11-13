@@ -71,9 +71,6 @@ class UDPPacket:
                          peer_port=peer_port,
                          data=data)
 
-    def len(self):
-        return len(self.to_bytes())
-
     def to_bytes(self):
         buffer = bytearray()
         buffer.extend(self.pkt_type.to_bytes(SIZE['PKT_TYPE'],

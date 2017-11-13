@@ -226,7 +226,7 @@ class HTTPClient:
         self.socket.sendto(pkt.to_bytes(), self.router)
         self.debug('Packet sent to router at: ' + str(self.router[0])
                    + ':' + str(self.router[1])
-                   + ' (size = ' + str(pkt.len()) + ')')
+                   + ' (size = ' + str(len(pkt.data)) + ')')
 
     def recv(self):
         # Wait for a reply from the server
@@ -248,9 +248,11 @@ class HTTPClient:
             self.socket.settimeout(self.timeout)
 
             # Receive server response
-            resp, origin = self.recv()
-            self.debug('Received response:\r\n\r\n' + resp, True)
-            self.debug('Origin: ' + origin)
+            raw, origin = self.recv()
+
+            # Extract packet information
+            pkt = packet.UDPPacket.from_bytes(raw=raw)
+            self.debug('Received response:\r\n\r\n' + pkt.data, True)
 
         except socket.timeout:
             self.debug('Connection timed out')
