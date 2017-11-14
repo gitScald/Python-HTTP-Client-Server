@@ -82,7 +82,6 @@ class Request:
                 # Set the content length to the length of the data
                 self.headers['Content-Length: '] = str(len(self.body))
 
-
     def get_file_data(self):
         import json
         with open(self.data, 'r') as file:
@@ -94,7 +93,7 @@ class HTTPClient:
                  rqst_type,
                  verbose=False,
                  output='',
-                 headers={},
+                 headers=None,
                  data_inline=None,
                  data_file=None,
                  url='',
@@ -132,9 +131,9 @@ class HTTPClient:
 
         if ip is not None:
             self.server_addr = ip.group('host')
-            self.debug('Server IP address resolved to: ' + str(self.server_addr))
+            HTTPClient.debug('Server IP address resolved to: ' + str(self.server_addr))
             self.server_port = int(ip.group('port'))
-            self.debug('Server port number: ' + str(self.server_port))
+            HTTPClient.debug('Server port number: ' + str(self.server_port))
             self.server = (self.server_addr, self.server_port)
 
         else:
@@ -153,25 +152,28 @@ class HTTPClient:
                     host_ip = ''
                     try:
                         host_ip = socket.gethostbyname(host_name)
-                        self.debug('Server IP address resolved to: ' + host_ip)
+                        HTTPClient.debug('Server IP address resolved to: ' + host_ip)
                         host_port = 8080
                         if url.group('port') is not None:
                             host_port = url.group('port')
-                        self.debug('Server port number: ' + str(host_port))
+                        HTTPClient.debug('Server port number: ' + str(host_port))
                         self.server_addr = host_ip
                         self.server_port = host_port
                         self.server = (self.server_addr, str(self.server_port))
                     except socket.gaierror:
-                        self.debug('Could not resolve host name: ' + host_name)
+                        HTTPClient.debug('Could not resolve host name: ' + host_name)
 
             else:
-                self.debug('Invalid address format: ' + str(self.server_addr))
+                HTTPClient.debug('Invalid address format: ' + str(self.server_addr))
                 valid = False
 
         if valid:
             self.router = (self.server_addr, 3000)
 
             self.run()
+
+    def handshake(self):
+        pass
 
     def build_rqst(self):
         rqst = None
@@ -187,7 +189,7 @@ class HTTPClient:
 
         url = re.search(REGEX['PATH_ARGS'], self.url).groupdict()
         if url is None:
-            self.debug('Could not resolve path in URL: ' + self.url)
+            HTTPClient.debug('Could not resolve path in URL: ' + self.url)
 
         else:
             # Generate request
@@ -215,18 +217,18 @@ class HTTPClient:
     def send_rqst(self, rqst):
         # Initialize socket and send request to router
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        pkt = packet.UDPPacket(pkt_type=1,
+        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
                                seq_num=1,
                                peer_ip=self.server_addr,
                                peer_port=self.server_port,
                                data=str(rqst))
-        self.debug('Built packet:\r\n\r\n' + str(pkt), True)
+        HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
         # Send packet to router
         self.socket.sendto(pkt.to_bytes(), self.router)
-        self.debug('Packet sent to router at: ' + str(self.router[0])
-                   + ':' + str(self.router[1])
-                   + ' (size = ' + str(len(pkt.data)) + ')')
+        HTTPClient.debug('Packet sent to router at: ' + str(self.router[0])
+                         + ':' + str(self.router[1])
+                         + ' (size = ' + str(len(pkt.data)) + ')')
 
     def recv(self):
         # Wait for a reply from the server
@@ -252,12 +254,12 @@ class HTTPClient:
 
             # Extract packet information
             pkt = packet.UDPPacket.from_bytes(raw=raw)
-            self.debug('Received response:\r\n\r\n' + pkt.data, True)
+            HTTPClient.debug('Received response:\r\n\r\n' + pkt.data, True)
 
         except socket.timeout:
-            self.debug('Connection timed out')
+            HTTPClient.debug('Connection timed out')
 
         finally:
             # Close connection
-            self.debug('Closing connection')
+            HTTPClient.debug('Closing connection')
             self.socket.close()

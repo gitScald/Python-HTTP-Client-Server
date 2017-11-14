@@ -5,12 +5,17 @@ ENCODING = 'utf-8'
 PKT_MIN = 11
 PKT_MAX = 1024
 
-PKT_TYPE = ['SYN', 'ACK', 'NAK', 'DATA']
+PKT_TYPE = {'SYN': 0,
+            'SYN-ACK': 1,
+            'ACK': 2,
+            'NAK': 3,
+            'DATA': 4}
 
 SIZE = {'PKT_TYPE': 1,
         'SEQ_NUM': 4,
         'PEER_IP': 4,
         'PEER_PORT': 2}
+
 
 class UDPPacket:
     def __init__(self,

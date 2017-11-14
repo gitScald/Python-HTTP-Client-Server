@@ -1,6 +1,5 @@
 import argparse
 import httpc_lib
-import socket
 
 DESCRIPTION = 'httpc is a simple cURL-like HTTP client application.'
 
