@@ -18,6 +18,7 @@ DIVIDER = '-' * 80
 ENCODING = 'utf-8'
 HTTP_VERSION = 'HTTP/1.1'
 THREAD_DELAY = 10
+WINDOW_SIZE = pow(2, 31)
 
 CMD = {'GET': 'GET',
        'POST': 'POST'}
@@ -104,10 +105,11 @@ class FileServer:
                     if rqst is not None:
                         pkt = packet.UDPPacket.from_bytes(raw=rqst)
 
-                        name = 'Connection-' + str(len(self.threads))
+                        name = 'RecvThread-' + str(len(self.threads))
 
                         # Each new connection is handled by a separate thread
-                        t = threading.Thread(name=name, target=self.handle,
+                        t = threading.Thread(name=name,
+                                             target=self.handle,
                                              args=(pkt, origin))
                         self.threads.append(t)
                         t.start()
@@ -140,6 +142,7 @@ class FileServer:
             if pkt_type == packet.PKT_TYPE['SYN']\
                     and seq_num == 0\
                     and threading.current_thread() not in self.seq_nums:
+                FileServer.debug('Received SYN packet')
                 # Add an entry into the index of sequence numbers
                 self.seq_nums[threading.current_thread()] = seq_num
                 self.send_synack(origin, dest)
@@ -147,19 +150,22 @@ class FileServer:
             # Address ACK packet
             elif pkt_type == packet.PKT_TYPE['ACK']\
                     and seq_num >= 1\
-                    and threading.current_thread() in self.seq_nums:
-                pass
+                    and threading.current_thread() not in self.seq_nums:
+                FileServer.debug('Received ACK packet')
 
             # Address NAK packet
             elif pkt_type == packet.PKT_TYPE['NAK']\
                     and seq_num >= 1\
-                    and threading.current_thread() in self.seq_nums:
-                pass
+                    and threading.current_thread() not in self.seq_nums:
+                FileServer.debug('Received NAK packet')
 
             # Acknowledge DATA packet and parse client request
-            elif pkt_type == packet.PKT_TYPE['DATA']\
-                    and seq_num >= 1\
-                    and threading.current_thread() in self.seq_nums:
+            # elif pkt_type == packet.PKT_TYPE['DATA']\
+            #         and seq_num >= 1\
+            #         and threading.current_thread() not in self.seq_nums:
+            elif pkt_type == packet.PKT_TYPE['DATA'] \
+                    and threading.current_thread() not in self.seq_nums:
+                FileServer.debug('Received DATA packet')
                 rqst = pkt.data
                 self.parse(origin, dest, rqst)
 

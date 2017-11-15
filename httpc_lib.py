@@ -2,6 +2,7 @@ import logging
 import packet
 import re
 import socket
+import threading
 
 BUFFER_SIZE = 1024
 DIVIDER = '-' * 80
@@ -113,6 +114,11 @@ class HTTPClient:
         self.socket = None
         self.timeout = 5 if timeout is None else timeout
         self.router = ()
+        self.threads = []
+        self.curr_send = 0
+        self.curr_recv = 0
+        self.window_send = []
+        self.window_recv = []
 
         # Initialize client
         self.init()
@@ -172,9 +178,6 @@ class HTTPClient:
 
             self.run()
 
-    def handshake(self):
-        pass
-
     def build_rqst(self):
         rqst = None
 
@@ -215,30 +218,63 @@ class HTTPClient:
         return rqst
 
     def send_rqst(self, rqst):
-        # Initialize socket and send request to router
+        # Initialize socket
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
-                               seq_num=1,
-                               peer_ip=self.server_addr,
-                               peer_port=self.server_port,
-                               data=str(rqst))
-        HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
-        # Send packet to router
+        # Determine how many packets need to be sent
+        left_to_send = len(str(rqst))
+        while left_to_send > 0:
+            pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
+                                   seq_num=self.curr_send,
+                                   peer_ip=self.server_addr,
+                                   peer_port=self.server_port,
+                                   data=str(rqst))
+            left_to_send -= len(pkt.data)
+            self.curr_send += 1
+            self.window_send.append(pkt)
+            HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
+
+        # Send window to server; each packet is dispatched to a thread
+        for pkt in self.window_send:
+            name = 'SendThread-' + str(len(self.window_send) + 1)
+            t = threading.Thread(name=name,
+                                 target=self.send_rqst_pkt,
+                                 args=(pkt,))
+            self.threads.append(t)
+            t.start()
+
+    def send_rqst_pkt(self, pkt):
+        # Packet dispatch
         self.socket.sendto(pkt.to_bytes(), self.router)
         HTTPClient.debug('Packet sent to router at: ' + str(self.router[0])
                          + ':' + str(self.router[1])
                          + ' (size = ' + str(len(pkt.data)) + ')')
+        self.threads.remove(threading.current_thread())
 
     def recv(self):
         # Wait for a reply from the server
-        resp, origin = self.socket.recvfrom(BUFFER_SIZE)
+        raw, origin = self.socket.recvfrom(BUFFER_SIZE)
+
+        # Dispatch reception to a thread
+        if raw is not None:
+            name = 'RecvThread-' + str(len(self.window_recv))
+            t = threading.Thread(name=name,
+                                 target=self.recv_pkt,
+                                 args=(raw, origin))
+            self.threads.append(t)
+            t.start()
+
+    def recv_pkt(self, raw, origin):
+        # Extract packet information
+        pkt = packet.UDPPacket.from_bytes(raw=raw)
+        self.window_recv.append(pkt)
+        HTTPClient.debug('Received packet:\r\n\r\n' + pkt.data, True)
+
         if self.output is not None:
             with open(self.output, 'a') as file:
-                file.write(origin)
-                file.write(resp)
+                file.write(pkt.data)
 
-        return resp, origin
+        self.threads.remove(threading.current_thread())
 
     def run(self):
         # Build request
@@ -249,12 +285,10 @@ class HTTPClient:
             self.send_rqst(rqst)
             self.socket.settimeout(self.timeout)
 
-            # Receive server response
-            raw, origin = self.recv()
-
-            # Extract packet information
-            pkt = packet.UDPPacket.from_bytes(raw=raw)
-            HTTPClient.debug('Received response:\r\n\r\n' + pkt.data, True)
+            # Loop until timeout (i.e., end of transmission)
+            while True:
+                # Receive server packet(s)
+                self.recv()
 
         except socket.timeout:
             HTTPClient.debug('Connection timed out')

@@ -1,0 +1,4 @@
+- 3-way handshake: connection establishment
+- sliding window
+- selective repeat
+- 3-way handshake: connection closure
