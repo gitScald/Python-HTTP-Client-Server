@@ -226,6 +226,8 @@ class HTTPClient:
         num_pkts = math.ceil(len(str(rqst)) / packet.PKT_MAX)
         buffer = ''
         left_to_send = str(rqst)
+        self.debug('Sending ' + str(num_pkts) + ' packets')
+
         while len(left_to_send) > 0:
             # Use a buffer to split the request into as many packets as needed
             for char in left_to_send:
@@ -254,9 +256,6 @@ class HTTPClient:
                                  args=(pkt,))
             self.threads.append(t)
             t.start()
-        self.debug('Sending ' + str(num_pkts)
-                   + ' packets to the router via '
-                   + str(len(self.threads)) + ' threads')
 
     def send_rqst_pkt(self, pkt):
         # Packet dispatch

@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import os.path
 import packet
@@ -64,6 +65,8 @@ class FileServer:
         self.seq_nums = {}
         self.timeout = 1
         self.wdir = os.path.join(self.cwd, args.d) if args.d is not None else self.cwd
+        self.curr_send = 0
+        self.curr_recv = 0
         self.window_send = []
         self.window_recv = []
 
@@ -515,19 +518,48 @@ class FileServer:
                 self.send_resp(origin, dest, resp)
 
     def send_resp(self, origin, dest, resp):
-        # Generate packet
-        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
-                               seq_num=1,
-                               peer_ip=dest[0],
-                               peer_port=dest[1],
-                               data=Response.to_str(resp))
-        FileServer.debug('Formed packet:\r\n' + DIVIDER + '\r\n' + str(pkt), True)
+        # Determine how many packets need to be sent
+        num_pkts = math.ceil(len(str(resp)) / packet.PKT_MAX)
+        buffer = ''
+        left_to_send = Response.to_str(resp)
+        self.debug('Sending ' + str(num_pkts) + ' packets')
 
-        # Send packet
+        while len(left_to_send) > 0:
+            # Use a buffer to split the request into as many packets as needed
+            for char in left_to_send:
+                if len(buffer) < (packet.PKT_MAX - 11):
+                    buffer += char
+
+            pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
+                                   seq_num=self.curr_send,
+                                   peer_ip=str(dest[0]),
+                                   peer_port=dest[1],
+                                   data=buffer)
+
+            left_to_send = left_to_send[len(buffer):]
+            buffer = ''
+            self.curr_send += 1
+            self.window_send.append(pkt)
+            FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
+
+        # Send window to server; each packet is dispatched to a thread
+        thread_id = 0
+        for pkt in self.window_send:
+            name = 'SendThread-' + str(thread_id)
+            thread_id += 1
+            t = threading.Thread(name=name,
+                                 target=self.send_resp_pkt,
+                                 args=(origin, pkt))
+            self.threads.append(t)
+            t.start()
+
+    def send_resp_pkt(self, origin, pkt):
+        # Packet dispatch
         self.sock.sendto(pkt.to_bytes(), origin)
         FileServer.debug('Packet sent to router at: ' + str(origin[0])
                          + ':' + str(origin[1])
                          + ' (size = ' + str(len(pkt.data)) + ')')
+        self.threads.remove(threading.current_thread())
 
     def exit(self):
         # Make sure all other threads finish processing their requests
