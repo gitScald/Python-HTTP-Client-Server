@@ -1,4 +1,5 @@
 import logging
+import math
 import packet
 import re
 import socket
@@ -222,26 +223,40 @@ class HTTPClient:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         # Determine how many packets need to be sent
-        left_to_send = len(str(rqst))
-        while left_to_send > 0:
+        num_pkts = math.ceil(len(str(rqst)) / packet.PKT_MAX)
+        buffer = ''
+        left_to_send = str(rqst)
+        while len(left_to_send) > 0:
+            # Use a buffer to split the request into as many packets as needed
+            for char in left_to_send:
+                if len(buffer) < (packet.PKT_MAX - 11):
+                    buffer += char
+
             pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
                                    seq_num=self.curr_send,
                                    peer_ip=self.server_addr,
                                    peer_port=self.server_port,
-                                   data=str(rqst))
-            left_to_send -= len(pkt.data)
+                                   data=buffer)
+
+            left_to_send = left_to_send[len(buffer):]
+            buffer = ''
             self.curr_send += 1
             self.window_send.append(pkt)
             HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
         # Send window to server; each packet is dispatched to a thread
+        thread_id = 0
         for pkt in self.window_send:
-            name = 'SendThread-' + str(len(self.window_send) + 1)
+            name = 'SendThread-' + str(thread_id)
+            thread_id += 1
             t = threading.Thread(name=name,
                                  target=self.send_rqst_pkt,
                                  args=(pkt,))
             self.threads.append(t)
             t.start()
+        self.debug('Sending ' + str(num_pkts)
+                   + ' packets to the router via '
+                   + str(len(self.threads)) + ' threads')
 
     def send_rqst_pkt(self, pkt):
         # Packet dispatch

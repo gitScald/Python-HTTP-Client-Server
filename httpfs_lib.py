@@ -64,6 +64,8 @@ class FileServer:
         self.seq_nums = {}
         self.timeout = 1
         self.wdir = os.path.join(self.cwd, args.d) if args.d is not None else self.cwd
+        self.window_send = []
+        self.window_recv = []
 
         # Turn off logging if verbosity is set to False
         if not args.v:
@@ -408,7 +410,7 @@ class FileServer:
                     # Decrement number of readers
                     if reading:
                         self.locks_read[path] -= 1
-                        FileServer.debug('Released lock to read form file \'' + path + '\'')
+                        FileServer.debug('Released lock to read fromm file \'' + path + '\'')
 
                 # Last modification date
                 stats = os.stat(path[1:path_end])

@@ -1,4 +1,4 @@
 - 3-way handshake: connection establishment
-- sliding window
+- sliding window (client now correctly splits request into multiple packets)
 - selective repeat
 - 3-way handshake: connection closure

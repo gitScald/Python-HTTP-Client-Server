@@ -4271,3 +4271,50 @@
 22:10:15.124444 router is listening at :3000
 22:10:23.414918 [queue=0] packet #0, 192.168.1.100:53393 -> 192.168.1.100:8080, sz=86 is delivered
 22:10:23.429919 [queue=0] packet #1, 192.168.1.100:8080 -> 192.168.1.100:53393, sz=461 is delivered
+21:01:48.807599 config: drop-rate=0.00, max-delay=0s, seed=1511316108806599000
+21:01:48.812599 router is listening at :3000
+21:15:25.278298 [queue=0] packet #0, 192.168.1.100:54664 -> 192.168.1.100:8080, sz=86 is delivered
+21:15:25.283298 [queue=0] packet #1, 192.168.1.100:8080 -> 192.168.1.100:54664, sz=461 is delivered
+21:30:58.470674 [queue=0] packet #0, 192.168.1.100:59749 -> 192.168.1.100:8080, sz=86 is delivered
+21:30:58.481674 [queue=0] packet #1, 192.168.1.100:8080 -> 192.168.1.100:59749, sz=461 is delivered
+21:31:17.374755 [queue=0] packet #0, 192.168.1.100:59758 -> 192.168.1.100:8080, sz=86 is delivered
+21:31:17.384755 [queue=0] packet #1, 192.168.1.100:8080 -> 192.168.1.100:59758, sz=461 is delivered
+21:33:30.449366 [queue=0] packet #0, 192.168.1.100:55958 -> 192.168.1.100:8080, sz=86 is delivered
+21:33:30.463367 [queue=0] packet #1, 192.168.1.100:8080 -> 192.168.1.100:55958, sz=461 is delivered
+21:33:48.544401 [queue=0] packet #0, 192.168.1.100:55965 -> 192.168.1.100:8080, sz=86 is delivered
+21:33:48.551402 [queue=0] packet #1, 192.168.1.100:8080 -> 192.168.1.100:55965, sz=461 is delivered
+21:40:27.517221 [queue=0] packet #0, 192.168.1.100:52609 -> 192.168.1.100:8080, sz=86 is delivered
+21:40:27.525222 [queue=0] packet #1, 192.168.1.100:8080 -> 192.168.1.100:52609, sz=461 is delivered
+21:43:23.517288 [queue=0] packet #0, 192.168.1.100:63618 -> 192.168.1.100:8080, sz=86 is delivered
+21:43:23.531289 invalid packet: packet is exceeded max length: 1394 bytes
+21:48:01.403182 [queue=0] packet #0, 192.168.1.100:57332 -> 192.168.1.100:8080, sz=160 is delivered
+21:55:26.121618 failed to receive message: read udp 0.0.0.0:3000: wsarecvfrom: A message sent on a datagram socket was larger than the internal message buffer or some other network limit, or the buffer used to receive a datagram into was smaller than the datagram itself.
+21:56:14.093362 invalid packet: packet is exceeded max length: 1638 bytes
+22:01:11.954399 invalid packet: packet is exceeded max length: 1638 bytes
+22:03:41.487952 invalid packet: packet is exceeded max length: 1638 bytes
+22:04:59.561417 invalid packet: packet is exceeded max length: 1638 bytes
+22:08:07.998195 invalid packet: packet is exceeded max length: 1638 bytes
+22:08:23.796099 invalid packet: packet is exceeded max length: 1638 bytes
+22:18:28.784702 [queue=0] packet #0, 192.168.1.100:50183 -> 192.168.1.100:8080, sz=1 is delivered
+22:19:30.815250 [queue=0] packet #0, 192.168.1.100:59124 -> 192.168.1.100:8080, sz=1 is delivered
+22:19:58.438830 [queue=0] packet #0, 192.168.1.100:59132 -> 192.168.1.100:8080, sz=1013 is delivered
+22:21:11.944034 [queue=0] packet #0, 192.168.1.100:59153 -> 192.168.1.100:8080, sz=1013 is delivered
+22:21:11.945034 [queue=0] packet #1, 192.168.1.100:59153 -> 192.168.1.100:8080, sz=1013 is delivered
+22:21:11.945034 [queue=0] packet #2, 192.168.1.100:59153 -> 192.168.1.100:8080, sz=1013 is delivered
+22:22:03.694994 [queue=0] packet #0, 192.168.1.100:65392 -> 192.168.1.100:8080, sz=1013 is delivered
+22:22:03.694994 [queue=0] packet #1, 192.168.1.100:65392 -> 192.168.1.100:8080, sz=614 is delivered
+22:22:03.696995 [queue=0] packet #2, 192.168.1.100:65392 -> 192.168.1.100:8080, sz=0 is delivered
+22:22:16.936752 [queue=0] packet #0, 192.168.1.100:65397 -> 192.168.1.100:8080, sz=1013 is delivered
+22:22:16.936752 [queue=0] packet #1, 192.168.1.100:65397 -> 192.168.1.100:8080, sz=614 is delivered
+22:23:21.692456 [queue=0] packet #0, 192.168.1.100:65415 -> 192.168.1.100:8080, sz=1013 is delivered
+22:23:21.692456 [queue=0] packet #1, 192.168.1.100:65415 -> 192.168.1.100:8080, sz=614 is delivered
+22:23:47.384925 [queue=0] packet #0, 192.168.1.100:57910 -> 192.168.1.100:8080, sz=1013 is delivered
+22:23:47.385925 [queue=0] packet #1, 192.168.1.100:57910 -> 192.168.1.100:8080, sz=614 is delivered
+22:24:43.457132 [queue=0] packet #0, 192.168.1.100:58402 -> 192.168.1.100:8080, sz=1013 is delivered
+22:24:43.458132 [queue=0] packet #1, 192.168.1.100:58402 -> 192.168.1.100:8080, sz=614 is delivered
+22:25:32.660947 [queue=0] packet #0, 192.168.1.100:58417 -> 192.168.1.100:8080, sz=1013 is delivered
+22:25:32.660947 [queue=0] packet #1, 192.168.1.100:58417 -> 192.168.1.100:8080, sz=614 is delivered
+22:26:14.213323 [queue=0] packet #0, 192.168.1.100:58428 -> 192.168.1.100:8080, sz=1013 is delivered
+22:26:14.214323 [queue=0] packet #1, 192.168.1.100:58428 -> 192.168.1.100:8080, sz=614 is delivered
+22:26:41.883906 [queue=0] packet #0, 192.168.1.100:58436 -> 192.168.1.100:8080, sz=1013 is delivered
+22:26:41.883906 [queue=0] packet #1, 192.168.1.100:58436 -> 192.168.1.100:8080, sz=614 is delivered

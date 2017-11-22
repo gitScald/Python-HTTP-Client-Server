@@ -31,7 +31,12 @@ class UDPPacket:
         self.peer_port = peer_port
 
     def __repr__(self):
-        return 'TYPE: ' + str(self.pkt_type) + '\r\n'\
+        pkt_type = ''
+        for key, val in PKT_TYPE.items():
+            if val == self.pkt_type:
+                pkt_type = key
+
+        return 'TYPE: ' + str(self.pkt_type) + " (" + pkt_type + ")" + '\r\n'\
                + 'SEQ. NUM: ' + str(self.seq_num) + '\r\n'\
                + 'PEER IP: ' + str(self.peer_ip) + '\r\n'\
                + 'PEER PORT: ' + str(self.peer_port) + '\r\n'\
