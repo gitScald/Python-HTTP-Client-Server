@@ -143,40 +143,46 @@ class FileServer:
             peer_port = pkt.peer_port
             dest = (peer_ip, peer_port)
 
-            # Acknowledge SYN packet
-            if pkt_type == packet.PKT_TYPE['SYN']\
-                    and seq_num == 0\
-                    and threading.current_thread() not in self.seq_nums:
-                FileServer.debug('Received SYN packet')
-                # Add an entry into the index of sequence numbers
-                self.seq_nums[threading.current_thread()] = seq_num
-                self.send_synack(origin, dest)
+            # Check packet sequence number
+            if pkt.seq_num == self.curr_recv:
+                # Acknowledge SYN packet
+                if pkt_type == packet.PKT_TYPE['SYN']\
+                        and seq_num == packet.PKT_MIN\
+                        and threading.current_thread() not in self.seq_nums:
+                    FileServer.debug('Received SYN packet')
+                    # Add an entry into the index of sequence numbers
+                    self.seq_nums[threading.current_thread()] = seq_num
+                    self.send_synack(origin, dest)
 
-            # Address ACK packet
-            elif pkt_type == packet.PKT_TYPE['ACK']\
-                    and seq_num >= 1\
-                    and threading.current_thread() not in self.seq_nums:
-                FileServer.debug('Received ACK packet')
+                # Address ACK packet
+                elif pkt_type == packet.PKT_TYPE['ACK']\
+                        and seq_num >= packet.PKT_MIN\
+                        and threading.current_thread() not in self.seq_nums:
+                    FileServer.debug('Received ACK packet')
 
-            # Address NAK packet
-            elif pkt_type == packet.PKT_TYPE['NAK']\
-                    and seq_num >= 1\
-                    and threading.current_thread() not in self.seq_nums:
-                FileServer.debug('Received NAK packet')
+                # Address NAK packet
+                elif pkt_type == packet.PKT_TYPE['NAK']\
+                        and seq_num >= packet.PKT_MIN\
+                        and threading.current_thread() not in self.seq_nums:
+                    FileServer.debug('Received NAK packet')
 
-            # Acknowledge DATA packet and parse client request
-            # elif pkt_type == packet.PKT_TYPE['DATA']\
-            #         and seq_num >= 1\
-            #         and threading.current_thread() not in self.seq_nums:
-            elif pkt_type == packet.PKT_TYPE['DATA'] \
-                    and threading.current_thread() not in self.seq_nums:
-                FileServer.debug('Received DATA packet')
-                rqst = pkt.data
-                self.parse(origin, dest, rqst)
+                # Acknowledge DATA packet and parse client request
+                # elif pkt_type == packet.PKT_TYPE['DATA']\
+                #         and seq_num >= packet.PKT_MIN\
+                #         and threading.current_thread() not in self.seq_nums:
+                elif pkt_type == packet.PKT_TYPE['DATA'] \
+                        and threading.current_thread() not in self.seq_nums:
+                    FileServer.debug('Received DATA packet')
+                    rqst = pkt.data
+                    self.parse(origin, dest, rqst)
 
-            # Reject all other cases
+                # Reject all other packet types
+                else:
+                    FileServer.debug('Unexpected packet type; packet dropped')
+
+            # Reject all other sequence numbers
             else:
-                FileServer.debug('Unexpected packet; packet dropped')
+                FileServer.debug('Unexpected sequence number; packet dropped')
 
             # Clean up thread
             self.threads.remove(threading.current_thread())
@@ -187,13 +193,13 @@ class FileServer:
 
     def send_synack(self, origin, dest):
         # Generate SYN-ACK packet
-        self.seq_nums[threading.current_thread()] += 1
+        self.seq_nums[threading.current_thread()] += packet.PKT_MIN
         pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['SYN-ACK'],
-                               seq_num=1,
+                               seq_num=self.seq_nums[threading.current_thread()],
                                peer_ip=dest[0],
                                peer_port=dest[1],
                                data='')
-        FileServer.debug('Formed packet:\r\n' + DIVIDER + '\r\n' + str(pkt), True)
+        FileServer.debug('Built packet:\r\n' + DIVIDER + '\r\n' + str(pkt), True)
 
         # Send packet
         self.sock.sendto(pkt.to_bytes(), origin)

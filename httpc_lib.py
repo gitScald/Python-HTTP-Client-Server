@@ -116,6 +116,7 @@ class HTTPClient:
         self.timeout = 5 if timeout is None else timeout
         self.router = ()
         self.threads = []
+        self.connected = False
         self.curr_send = 0
         self.curr_recv = 0
         self.window_send = []
@@ -179,6 +180,26 @@ class HTTPClient:
 
             self.run()
 
+    def send_syn(self):
+        # Initialize socket
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        # Generate SYN packet
+        self.curr_send = packet.PKT_MIN
+        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['SYN'],
+                               seq_num=self.curr_send,
+                               peer_ip=self.server_addr,
+                               peer_port=self.server_port,
+                               data='')
+        HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
+
+        # Send packet; SYN-ACK sequence number will be 2*(PKT_MIN)
+        self.curr_recv = 2 * packet.PKT_MIN
+        self.socket.sendto(pkt.to_bytes(), self.router)
+        HTTPClient.debug('Packet sent to router at: ' + str(self.router[0])
+                         + ':' + str(self.router[1])
+                         + ' (size = ' + str(len(pkt.data)) + ')')
+
     def build_rqst(self):
         rqst = None
 
@@ -219,9 +240,6 @@ class HTTPClient:
         return rqst
 
     def send_rqst(self, rqst):
-        # Initialize socket
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
         # Determine how many packets need to be sent
         num_pkts = math.ceil(len(str(rqst)) / packet.PKT_MAX)
         buffer = ''
@@ -282,11 +300,41 @@ class HTTPClient:
         # Extract packet information
         pkt = packet.UDPPacket.from_bytes(raw=raw)
         self.window_recv.append(pkt)
-        HTTPClient.debug('Received packet:\r\n\r\n' + pkt.data, True)
+        HTTPClient.debug('Received packet:\r\n\r\n' + str(pkt), True)
 
         if self.output is not None:
             with open(self.output, 'a') as file:
                 file.write(pkt.data)
+
+        # Check packet sequence number
+        if pkt.seq_num == self.curr_recv:
+            # Handle SYN-ACK packet
+            if pkt.pkt_type == packet.PKT_TYPE['SYN-ACK']:
+                HTTPClient.debug('Received SYN-ACK packet')
+                self.connected = True
+
+            # Handle ACK packet
+            elif pkt.pkt_type == packet.PKT_TYPE['ACK']:
+                # Slide window down
+                pass
+
+            # Handle NAK packet
+            elif pkt.pkt_type == packet.PKT_TYPE['NAK']:
+                # Resend packet dispatched to this thread
+                pass
+
+            # Handle DATA packet
+            elif pkt.pkt_type == packet.PKT_TYPE['DATA']:
+                # Extract packet data and slide window
+                pass
+
+            # Reject all other packet types
+            else:
+                HTTPClient.debug('Unexpected packet type; packet dropped')
+
+        # Reject all other sequence numbers
+        else:
+            HTTPClient.debug('Unexpected sequence number; packet dropped')
 
         self.threads.remove(threading.current_thread())
 
@@ -294,20 +342,44 @@ class HTTPClient:
         # Build request
         rqst = self.build_rqst()
 
-        # Handle timeout
         try:
-            self.send_rqst(rqst)
+            # Try establishing a connection
+            self.send_syn()
             self.socket.settimeout(self.timeout)
 
-            # Loop until timeout (i.e., end of transmission)
-            while True:
-                # Receive server packet(s)
+            # Loop until a SYN-ACK packet is received
+            while not self.connected:
                 self.recv()
+            self.socket.settimeout(None)
 
+        # Handle timeout
         except socket.timeout:
             HTTPClient.debug('Connection timed out')
+            # self.connected = False
 
-        finally:
-            # Close connection
-            HTTPClient.debug('Closing connection')
-            self.socket.close()
+            if self.socket is not None:
+                # Close connection
+                HTTPClient.debug('Closing socket')
+                self.socket.close()
+        print('hello')
+        # Once handshaking is done, the request can be sent
+        if self.connected:
+            print('hi')
+            try:
+                # Send request
+                self.send_rqst(rqst)
+                self.socket.settimeout(self.timeout)
+
+                # Loop until timeout (i.e., end of transmission)
+                while True:
+                    # Receive server packet(s)
+                    self.recv()
+
+                    # Handle timeout
+            except socket.timeout:
+                HTTPClient.debug('Connection timed out')
+
+            finally:
+                # Close connection
+                HTTPClient.debug('Closing socket')
+                self.socket.close()

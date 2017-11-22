@@ -1,5 +1,6 @@
 - 3-way handshake: connection establishment
 - sliding window (client & server now correctly split messages into multiple packets)
+    -> now handle SYN/SYN-ACK
     -> need to implement ACK/NAK system
 - selective repeat
 - 3-way handshake: connection closure
