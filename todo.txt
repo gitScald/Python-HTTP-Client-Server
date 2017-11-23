@@ -4,3 +4,4 @@
     -> need to implement ACK/NAK system
 - selective repeat
 - 3-way handshake: connection closure
+- 1-script test?
