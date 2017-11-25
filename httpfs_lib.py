@@ -18,6 +18,7 @@ BUFFER_SIZE = 1024
 DIVIDER = '-' * 80
 ENCODING = 'utf-8'
 HTTP_VERSION = 'HTTP/1.1'
+SOCK_TIMEOUT = 5
 THREAD_DELAY = 10
 WINDOW_SIZE = pow(2, 31)
 
@@ -61,12 +62,9 @@ class FileServer:
         self.locks_write = {}
         self.port = args.p
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.threads = []
-        self.seq_nums = {}
+        self.threads = dict()
         self.timeout = 1
         self.wdir = os.path.join(self.cwd, args.d) if args.d is not None else self.cwd
-        self.curr_send = 0
-        self.curr_recv = 0
         self.window_send = []
         self.window_recv = []
 
@@ -106,19 +104,24 @@ class FileServer:
                     self.sock.settimeout(self.timeout)
 
                     # Receive packet
-                    rqst, origin = self.sock.recvfrom(BUFFER_SIZE)
-                    if rqst is not None:
-                        pkt = packet.UDPPacket.from_bytes(raw=rqst)
+                    raw, origin = self.sock.recvfrom(BUFFER_SIZE)
+                    if raw is not None:
+                        pkt = packet.UDPPacket.from_bytes(raw=raw)
 
-                        name = 'RecvThread-' + str(len(self.threads))
+                        # Handle new 'connections':
+                        if pkt.pkt_type == packet.PKT_TYPE['SYN']\
+                                and pkt.seq_num == packet.PKT_MIN:
+                            name = 'Connection-' + str(len(self.threads))
 
-                        # Each new connection is handled by a separate thread
-                        t = threading.Thread(name=name,
-                                             target=self.handle,
-                                             args=(pkt, origin))
-                        self.threads.append(t)
-                        t.start()
-                        FileServer.debug('Active connections: ' + str(len(self.threads)))
+                            # Each new connection is handled by a separate thread
+                            t = threading.Thread(name=name,
+                                                 target=self.handle,
+                                                 args=(pkt, origin))
+
+                            # thread-obj: [curr_recv, curr_send]
+                            self.threads[t] = [packet.PKT_MIN, 2 * packet.PKT_MIN]
+                            t.start()
+                            FileServer.debug('Active connections: ' + str(len(self.threads)))
 
                 # Do nothing on timeout
                 except socket.timeout:
@@ -132,49 +135,42 @@ class FileServer:
         self.exit()
 
     def handle(self, pkt, origin):
+        # Print packet contents
+        FileServer.debug('Received packet:\r\n\r\n' + str(pkt), True)
+
+        # Extract packet information
+        pkt_type = pkt.pkt_type
+        seq_num = pkt.seq_num
+        peer_ip = pkt.peer_ip
+        peer_port = pkt.peer_port
+        dest = (peer_ip, peer_port)
+        data = pkt.data
+
         try:
-            # Print packet contents
-            FileServer.debug('Received packet:\r\n\r\n' + str(pkt), True)
-
-            # Extract packet information
-            pkt_type = pkt.pkt_type
-            seq_num = pkt.seq_num
-            peer_ip = pkt.peer_ip
-            peer_port = pkt.peer_port
-            dest = (peer_ip, peer_port)
-
             # Check packet sequence number
-            if pkt.seq_num == self.curr_recv:
-                # Acknowledge SYN packet
-                if pkt_type == packet.PKT_TYPE['SYN']\
-                        and seq_num == packet.PKT_MIN\
-                        and threading.current_thread() not in self.seq_nums:
+            if seq_num == self.threads[threading.current_thread()][0]:
+
+                # Address SYN packet
+                if pkt_type == packet.PKT_TYPE['SYN']:
                     FileServer.debug('Received SYN packet')
-                    # Add an entry into the index of sequence numbers
-                    self.seq_nums[threading.current_thread()] = seq_num
                     self.send_synack(origin, dest)
 
                 # Address ACK packet
-                elif pkt_type == packet.PKT_TYPE['ACK']\
-                        and seq_num >= packet.PKT_MIN\
-                        and threading.current_thread() not in self.seq_nums:
+                elif pkt_type == packet.PKT_TYPE['ACK']:
                     FileServer.debug('Received ACK packet')
+                    self.threads[threading.current_thread()][0] += packet.PKT_MIN
+                    # Update sending window
 
                 # Address NAK packet
-                elif pkt_type == packet.PKT_TYPE['NAK']\
-                        and seq_num >= packet.PKT_MIN\
-                        and threading.current_thread() not in self.seq_nums:
+                elif pkt_type == packet.PKT_TYPE['NAK']:
                     FileServer.debug('Received NAK packet')
+                    # Resend sending window
 
-                # Acknowledge DATA packet and parse client request
-                # elif pkt_type == packet.PKT_TYPE['DATA']\
-                #         and seq_num >= packet.PKT_MIN\
-                #         and threading.current_thread() not in self.seq_nums:
-                elif pkt_type == packet.PKT_TYPE['DATA'] \
-                        and threading.current_thread() not in self.seq_nums:
+                # Address DATA packet and parse client request
+                elif pkt_type == packet.PKT_TYPE['DATA']:
                     FileServer.debug('Received DATA packet')
-                    rqst = pkt.data
-                    self.parse(origin, dest, rqst)
+                    self.threads[threading.current_thread()][1] = seq_num + packet.PKT_MIN + len(data)
+                    self.parse(origin, dest, data)
 
                 # Reject all other packet types
                 else:
@@ -182,24 +178,32 @@ class FileServer:
 
             # Reject all other sequence numbers
             else:
-                FileServer.debug('Unexpected sequence number; packet dropped')
+                FileServer.debug('Unexpected sequence number; packet dropped (expected '
+                                 + str(self.threads[threading.current_thread()][0])
+                                 + ")")
 
+            # Receive next packet
+            raw, origin = self.sock.recvfrom(BUFFER_SIZE)
+            if raw is not None:
+                pkt = packet.UDPPacket.from_bytes(raw)
+                self.handle(pkt, origin)
+
+        except socket.timeout:
+            FileServer.debug('Connection timed out')
             # Clean up thread
-            self.threads.remove(threading.current_thread())
-            self.seq_nums.pop(threading.current_thread())
-
-        except Exception as e:
-            FileServer.debug(e)
+            self.threads.pop(threading.current_thread())
 
     def send_synack(self, origin, dest):
         # Generate SYN-ACK packet
-        self.seq_nums[threading.current_thread()] += packet.PKT_MIN
         pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['SYN-ACK'],
-                               seq_num=self.seq_nums[threading.current_thread()],
+                               seq_num=self.threads[threading.current_thread()][1],
                                peer_ip=dest[0],
                                peer_port=dest[1],
                                data='')
         FileServer.debug('Built packet:\r\n' + DIVIDER + '\r\n' + str(pkt), True)
+
+        # Update expected packet sequence number
+        self.threads[threading.current_thread()][0] += 2 * packet.PKT_MIN
 
         # Send packet
         self.sock.sendto(pkt.to_bytes(), origin)
@@ -537,27 +541,20 @@ class FileServer:
                     buffer += char
 
             pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
-                                   seq_num=self.curr_send,
+                                   seq_num=self.threads[threading.current_thread()][1],
                                    peer_ip=str(dest[0]),
                                    peer_port=dest[1],
                                    data=buffer)
 
             left_to_send = left_to_send[len(buffer):]
             buffer = ''
-            self.curr_send += 1
+            self.threads[threading.current_thread()][0] += packet.PKT_MIN + len(buffer)
             self.window_send.append(pkt)
             FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
-        # Send window to server; each packet is dispatched to a thread
-        thread_id = 0
+        # Send window to server
         for pkt in self.window_send:
-            name = 'SendThread-' + str(thread_id)
-            thread_id += 1
-            t = threading.Thread(name=name,
-                                 target=self.send_resp_pkt,
-                                 args=(origin, pkt))
-            self.threads.append(t)
-            t.start()
+            self.send_resp_pkt(origin, pkt)
 
     def send_resp_pkt(self, origin, pkt):
         # Packet dispatch
@@ -565,7 +562,6 @@ class FileServer:
         FileServer.debug('Packet sent to router at: ' + str(origin[0])
                          + ':' + str(origin[1])
                          + ' (size = ' + str(len(pkt.data)) + ')')
-        self.threads.remove(threading.current_thread())
 
     def exit(self):
         # Make sure all other threads finish processing their requests

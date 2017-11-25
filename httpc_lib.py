@@ -3,7 +3,6 @@ import math
 import packet
 import re
 import socket
-import threading
 
 BUFFER_SIZE = 1024
 DIVIDER = '-' * 80
@@ -115,7 +114,6 @@ class HTTPClient:
         self.socket = None
         self.timeout = 5 if timeout is None else timeout
         self.router = ()
-        self.threads = []
         self.connected = False
         self.curr_send = 0
         self.curr_recv = 0
@@ -157,7 +155,6 @@ class HTTPClient:
                 else:
                     # Try to resolve the host name
                     host_name = url.group('host')
-                    host_ip = ''
                     try:
                         host_ip = socket.gethostbyname(host_name)
                         HTTPClient.debug('Server IP address resolved to: ' + host_ip)
@@ -193,8 +190,25 @@ class HTTPClient:
                                data='')
         HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
-        # Send packet; SYN-ACK sequence number will be 2*(PKT_MIN)
-        self.curr_recv = 2 * packet.PKT_MIN
+        # Send packet and update sequence numbers
+        self.curr_recv += 2 * packet.PKT_MIN
+        self.curr_send += 2 * packet.PKT_MIN
+        self.socket.sendto(pkt.to_bytes(), self.router)
+        HTTPClient.debug('Packet sent to router at: ' + str(self.router[0])
+                         + ':' + str(self.router[1])
+                         + ' (size = ' + str(len(pkt.data)) + ')')
+
+    def send_ack(self):
+        # Generate ACK packet
+        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
+                               seq_num=self.curr_send,
+                               peer_ip=self.server_addr,
+                               peer_port=self.server_port,
+                               data='')
+        HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
+
+        # Send packet and update sequence numbers
+        self.curr_send += packet.PKT_MIN
         self.socket.sendto(pkt.to_bytes(), self.router)
         HTTPClient.debug('Packet sent to router at: ' + str(self.router[0])
                          + ':' + str(self.router[1])
@@ -258,43 +272,33 @@ class HTTPClient:
                                    peer_port=self.server_port,
                                    data=buffer)
 
-            left_to_send = left_to_send[len(buffer):]
-            buffer = ''
-            self.curr_send += 1
+            self.curr_send += packet.PKT_MIN + len(buffer)
+            self.curr_recv = self.curr_send
             self.window_send.append(pkt)
             HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
-        # Send window to server; each packet is dispatched to a thread
-        thread_id = 0
+            # Build next packet
+            left_to_send = left_to_send[len(buffer):]
+            buffer = ''
+
+        # Send window to server
         for pkt in self.window_send:
-            name = 'SendThread-' + str(thread_id)
-            thread_id += 1
-            t = threading.Thread(name=name,
-                                 target=self.send_rqst_pkt,
-                                 args=(pkt,))
-            self.threads.append(t)
-            t.start()
+            self.send_rqst_pkt(pkt)
 
     def send_rqst_pkt(self, pkt):
-        # Packet dispatch
         self.socket.sendto(pkt.to_bytes(), self.router)
         HTTPClient.debug('Packet sent to router at: ' + str(self.router[0])
                          + ':' + str(self.router[1])
                          + ' (size = ' + str(len(pkt.data)) + ')')
-        self.threads.remove(threading.current_thread())
 
     def recv(self):
         # Wait for a reply from the server
+        self.socket.settimeout(self.timeout)
         raw, origin = self.socket.recvfrom(BUFFER_SIZE)
 
-        # Dispatch reception to a thread
+        # Packet reception
         if raw is not None:
-            name = 'RecvThread-' + str(len(self.window_recv))
-            t = threading.Thread(name=name,
-                                 target=self.recv_pkt,
-                                 args=(raw, origin))
-            self.threads.append(t)
-            t.start()
+            self.recv_pkt(raw, origin)
 
     def recv_pkt(self, raw, origin):
         # Extract packet information
@@ -316,17 +320,17 @@ class HTTPClient:
             # Handle ACK packet
             elif pkt.pkt_type == packet.PKT_TYPE['ACK']:
                 # Slide window down
-                pass
+                HTTPClient.debug('Received ACK packet')
 
             # Handle NAK packet
             elif pkt.pkt_type == packet.PKT_TYPE['NAK']:
                 # Resend packet dispatched to this thread
-                pass
+                HTTPClient.debug('Received NAK packet')
 
             # Handle DATA packet
             elif pkt.pkt_type == packet.PKT_TYPE['DATA']:
                 # Extract packet data and slide window
-                pass
+                HTTPClient.debug('Received DATA packet')
 
             # Reject all other packet types
             else:
@@ -334,52 +338,54 @@ class HTTPClient:
 
         # Reject all other sequence numbers
         else:
-            HTTPClient.debug('Unexpected sequence number; packet dropped')
-
-        self.threads.remove(threading.current_thread())
+            HTTPClient.debug('Unexpected sequence number; packet dropped (expected '
+                             + str(self.curr_recv)
+                             + ')')
 
     def run(self):
         # Build request
         rqst = self.build_rqst()
 
         try:
-            # Try establishing a connection
-            self.send_syn()
-            self.socket.settimeout(self.timeout)
-
-            # Loop until a SYN-ACK packet is received
-            while not self.connected:
-                self.recv()
-            self.socket.settimeout(None)
-
-        # Handle timeout
-        except socket.timeout:
-            HTTPClient.debug('Connection timed out')
-            # self.connected = False
-
-            if self.socket is not None:
-                # Close connection
-                HTTPClient.debug('Closing socket')
-                self.socket.close()
-        print('hello')
-        # Once handshaking is done, the request can be sent
-        if self.connected:
-            print('hi')
             try:
-                # Send request
-                self.send_rqst(rqst)
-                self.socket.settimeout(self.timeout)
+                # Try establishing a connection
+                self.send_syn()
 
-                # Loop until timeout (i.e., end of transmission)
-                while True:
-                    # Receive server packet(s)
-                    self.recv()
+                # Wait for a SYN-ACK packet is received
+                self.recv()
 
-                    # Handle timeout
+            # Handle timeout
             except socket.timeout:
-                HTTPClient.debug('Connection timed out')
+                HTTPClient.debug('Handshake timed out')
 
-            finally:
-                # Close connection
-                HTTPClient.debug('Closing socket')
-                self.socket.close()
+                if self.socket is not None:
+                    # Close connection
+                    HTTPClient.debug('Closing socket')
+                    self.socket.close()
+
+            # Once handshaking is done, the request can be sent
+            if self.connected:
+                try:
+                    # First send an ACK to complete 3-way handshake
+                    self.send_ack()
+
+                    # Send request and wait for a response
+                    self.send_rqst(rqst)
+
+                    while True:
+                        # Receive server packet(s)
+                        self.recv()
+
+                # Handle timeout
+                except socket.timeout:
+                    HTTPClient.debug('Connection timed out; assume end of transmission')
+
+                finally:
+                    if self.socket is not None:
+                        # Close connection
+                        HTTPClient.debug('Closing socket')
+                        self.socket.close()
+
+        # Following a keyboard interrupt, stop accepting new connections and exit
+        except KeyboardInterrupt:
+            HTTPClient.debug('Client shutting down...')

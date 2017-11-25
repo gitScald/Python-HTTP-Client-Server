@@ -1,5 +1,6 @@
+2manythreads/
 .idea/
 __pycache__/
 ex/
-windows/router.log
+*.log
 *.pdf
