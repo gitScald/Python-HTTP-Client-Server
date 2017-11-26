@@ -3,6 +3,7 @@ import math
 import packet
 import re
 import socket
+import time
 
 BUFFER_SIZE = 1024
 DIVIDER = '-' * 80
@@ -233,14 +234,13 @@ class HTTPClient:
                                    data='')
         else:
             pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
-                                   seq_num=self.curr_send,
+                                   seq_num=3*packet.PKT_MIN,
                                    peer_ip=self.server_addr,
                                    peer_port=self.server_port,
                                    data='')
         HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
-        # Send packet and update sequence numbers
-        self.curr_send += packet.PKT_MIN
+        # Send packet
         self.socket.sendto(pkt.to_bytes(), self.router)
         HTTPClient.debug('Packet sent to router at: ' + str(self.router[0])
                          + ':' + str(self.router[1])
@@ -355,12 +355,6 @@ class HTTPClient:
                 HTTPClient.debug('Handshake accepted')
                 self.connected = True
 
-            # Handle ACK packet
-            elif pkt_type == packet.PKT_TYPE['ACK']:
-                # Slide window down
-                HTTPClient.debug('Completing handshake')
-                self.curr_recv += packet.PKT_MIN
-
             # Handle DATA packet
             elif pkt_type == packet.PKT_TYPE['DATA']:
                 # Extract packet data and slide window
@@ -378,13 +372,19 @@ class HTTPClient:
         else:
             # If ACK packet, send all potentially misreceived packets again
             if pkt_type == packet.PKT_TYPE['ACK']:
-                HTTPClient.debug('Received ACK packet')
-                for pkt_send in self.window_send:
-                    if pkt_send.seq_num >= pkt_type:
-                        self.send_rqst_pkt(pkt_send)
-                    else:
-                        # Older packets can be safely removed from sending window
-                        self.window_send.remove(pkt_send)
+                HTTPClient.debug('Received cumulative ACK packet')
+
+                # Resolve missing handshake ACK packet
+                if seq_num == packet.PKT_MIN:
+                    self.send_ack()
+
+                else:
+                    for pkt_send in self.window_send:
+                        if pkt_send.seq_num >= pkt_type:
+                            self.send_rqst_pkt(pkt_send)
+                        else:
+                            # Older packets can be safely removed from sending window
+                            self.window_send.remove(pkt_send)
 
             # Address NAK packet
             elif pkt_type == packet.PKT_TYPE['NAK']:
@@ -424,9 +424,12 @@ class HTTPClient:
             if self.connected:
                 try:
                     # First send an ACK to complete 3-way handshake
+                    time.sleep(1)
                     self.send_ack()
+                    self.curr_send += packet.PKT_MIN
 
                     # Send request and wait for a response
+                    time.sleep(1)
                     self.send_rqst(rqst)
 
                     while True:

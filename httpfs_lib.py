@@ -65,8 +65,8 @@ class FileServer:
         self.threads = dict()
         self.timeout = 1
         self.wdir = os.path.join(self.cwd, args.d) if args.d is not None else self.cwd
-        self.window_send = []
-        self.window_recv = []
+        self.window_send = dict()
+        self.window_recv = dict()
 
         # Turn off logging if verbosity is set to False
         if not args.v:
@@ -84,7 +84,7 @@ class FileServer:
     def last_inorder(self):
         # Return last in-order packet successfully received
         largest = 0
-        for pkt in self.window_recv:
+        for pkt in self.window_recv[threading.current_thread()]:
             if self.threads[threading.current_thread()][0] > pkt.seq_num > largest:
                 largest = pkt.seq_num
 
@@ -92,7 +92,7 @@ class FileServer:
 
     def pkt_recv(self, num):
         # Find a packet with the given sequence number in the receiving window
-        for pkt in self.window_recv:
+        for pkt in self.window_recv[threading.current_thread()]:
             if pkt.seq_num == num:
                 return pkt
 
@@ -100,14 +100,11 @@ class FileServer:
 
     def pkt_send(self, num):
         # Find a packet with the given sequence number in the sending window
-        for pkt in self.window_send:
+        for pkt in self.window_send[threading.current_thread()]:
             if pkt.seq_num == num:
                 return pkt
 
         return None
-
-    def sort_data(self):
-        self.window_recv.sort(key=lambda p: p.seq_num)
 
     def init(self):
         FileServer.debug('Starting server...')
@@ -147,8 +144,6 @@ class FileServer:
                             # thread-obj: [curr_recv, curr_send]
                             self.threads[t] = [packet.PKT_MIN, 2 * packet.PKT_MIN]
                             t.start()
-
-                            self.sock.settimeout(SOCK_TIMEOUT)
                             FileServer.debug('Active connections: ' + str(len(self.threads)))
 
                 # Do nothing on timeout
@@ -164,6 +159,12 @@ class FileServer:
         self.exit()
 
     def handle(self, pkt, origin):
+        # thread-obj: [pkts]
+        if not threading.current_thread() in self.window_recv:
+            self.window_recv[threading.current_thread()] = []
+        if not threading.current_thread() in self.window_send:
+            self.window_send[threading.current_thread()] = []
+
         # Print packet contents
         FileServer.debug('Received packet:\r\n\r\n' + str(pkt), True)
 
@@ -191,8 +192,6 @@ class FileServer:
 
                 # Address DATA packet and parse client request
                 elif pkt_type == packet.PKT_TYPE['DATA']:
-                    if pkt not in self.window_recv:
-                        self.window_recv.append(pkt)
                     self.threads[threading.current_thread()][1] = seq_num + packet.PKT_MIN + len(data)
                     self.parse(origin, dest, data)
 
@@ -204,13 +203,12 @@ class FileServer:
                 # If ACK packet, send all potentially misreceived packets again
                 if pkt_type == packet.PKT_TYPE['ACK']:
                     FileServer.debug('Received cumulative ACK packet')
-                    for pkt_send in self.window_send:
+                    for pkt_send in self.window_send[threading.current_thread()]:
                         if pkt_send.seq_num >= pkt_type:
-                            print('resending pkt #' + str(pkt_send.seq_num))
                             self.send_resp_pkt(origin, pkt_send)
                         else:
                             # Older packets can be safely removed from sending window
-                            self.window_send.remove(pkt)
+                            self.window_send[threading.current_thread()].remove(pkt)
 
                 # Address NAK packet
                 elif pkt_type == packet.PKT_TYPE['NAK']:
@@ -222,7 +220,7 @@ class FileServer:
                     # Accept out-of-order DATA packets; reorder them later
                     if pkt_type == packet.PKT_TYPE['DATA']\
                             and pkt not in self.window_recv:
-                        self.window_recv.append(pkt)
+                        self.window_recv[threading.current_thread()].append(pkt)
                     FileServer.debug('Unexpected sequence number (expected '
                                      + str(self.threads[threading.current_thread()][0])
                                      + ")")
@@ -231,8 +229,10 @@ class FileServer:
                         self.send_ack(origin, dest, last)
 
             # Receive next packet
+            self.sock.settimeout(SOCK_TIMEOUT)
             raw, origin = self.sock.recvfrom(BUFFER_SIZE)
             if raw is not None:
+                print('raw recv: ' + str(raw))
                 pkt = packet.UDPPacket.from_bytes(raw)
                 self.handle(pkt, origin)
 
@@ -254,6 +254,7 @@ class FileServer:
         self.threads[threading.current_thread()][0] += 2 * packet.PKT_MIN
 
         # Send packet
+        self.window_send[threading.current_thread()].append(pkt)
         self.sock.sendto(pkt.to_bytes(), origin)
         FileServer.debug('Packet sent to router at: ' + str(origin[0])
                          + ':' + str(origin[1])
@@ -270,6 +271,7 @@ class FileServer:
             FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
             # Send packet
+            self.window_send[threading.current_thread()].append(pkt)
             self.sock.sendto(pkt.to_bytes(), origin)
             FileServer.debug('Packet sent to router at: ' + str(origin[0])
                              + ':' + str(origin[1])
@@ -552,7 +554,8 @@ class FileServer:
 
                 # Wait until reader threads are done with the file
                 while self.locks_read[path] > 0:
-                    print('Reader thread(s) holding the lock to file \'' + path + '\'')
+                    FileServer.debug('Reader thread(s) holding the lock to file \''
+                                     + path + '\'')
                     time.sleep(1)
 
                 # Acquire lock to write to the file
@@ -613,12 +616,12 @@ class FileServer:
 
             left_to_send = left_to_send[len(buffer):]
             self.threads[threading.current_thread()][1] += packet.PKT_MIN + len(buffer)
-            self.window_send.append(pkt)
+            self.window_send[threading.current_thread()].append(pkt)
             FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
             buffer = ''
 
         # Send window to server
-        for pkt in self.window_send:
+        for pkt in self.window_send[threading.current_thread()]:
             self.send_resp_pkt(origin, pkt)
 
     def send_resp_pkt(self, origin, pkt):
