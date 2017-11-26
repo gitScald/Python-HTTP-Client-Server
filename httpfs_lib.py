@@ -81,6 +81,34 @@ class FileServer:
         else:
             logging.debug(message)
 
+    def last_inorder(self):
+        # Return last in-order packet successfully received
+        largest = 0
+        for pkt in self.window_recv:
+            if self.threads[threading.current_thread()][0] > pkt.seq_num > largest:
+                largest = pkt.seq_num
+
+        return self.pkt_recv(largest)
+
+    def pkt_recv(self, num):
+        # Find a packet with the given sequence number in the receiving window
+        for pkt in self.window_recv:
+            if pkt.seq_num == num:
+                return pkt
+
+        return None
+
+    def pkt_send(self, num):
+        # Find a packet with the given sequence number in the sending window
+        for pkt in self.window_send:
+            if pkt.seq_num == num:
+                return pkt
+
+        return None
+
+    def sort_data(self):
+        self.window_recv.sort(key=lambda p: p.seq_num)
+
     def init(self):
         FileServer.debug('Starting server...')
         FileServer.debug('Working directory: ' + self.wdir)
@@ -101,8 +129,6 @@ class FileServer:
         while self.active:
             try:
                 try:
-                    self.sock.settimeout(self.timeout)
-
                     # Receive packet
                     raw, origin = self.sock.recvfrom(BUFFER_SIZE)
                     if raw is not None:
@@ -121,6 +147,8 @@ class FileServer:
                             # thread-obj: [curr_recv, curr_send]
                             self.threads[t] = [packet.PKT_MIN, 2 * packet.PKT_MIN]
                             t.start()
+
+                            self.sock.settimeout(SOCK_TIMEOUT)
                             FileServer.debug('Active connections: ' + str(len(self.threads)))
 
                 # Do nothing on timeout
@@ -131,6 +159,7 @@ class FileServer:
             except KeyboardInterrupt:
                 FileServer.debug('Server shutting down...')
                 self.active = False
+                self.sock.settimeout(None)
 
         self.exit()
 
@@ -152,23 +181,18 @@ class FileServer:
 
                 # Address SYN packet
                 if pkt_type == packet.PKT_TYPE['SYN']:
-                    FileServer.debug('Received SYN packet')
+                    FileServer.debug('Handshake initiated')
                     self.send_synack(origin, dest)
 
                 # Address ACK packet
                 elif pkt_type == packet.PKT_TYPE['ACK']:
-                    FileServer.debug('Received ACK packet')
+                    FileServer.debug('Handshake complete')
                     self.threads[threading.current_thread()][0] += packet.PKT_MIN
-                    # Update sending window
-
-                # Address NAK packet
-                elif pkt_type == packet.PKT_TYPE['NAK']:
-                    FileServer.debug('Received NAK packet')
-                    # Resend sending window
 
                 # Address DATA packet and parse client request
                 elif pkt_type == packet.PKT_TYPE['DATA']:
-                    FileServer.debug('Received DATA packet')
+                    if pkt not in self.window_recv:
+                        self.window_recv.append(pkt)
                     self.threads[threading.current_thread()][1] = seq_num + packet.PKT_MIN + len(data)
                     self.parse(origin, dest, data)
 
@@ -176,11 +200,35 @@ class FileServer:
                 else:
                     FileServer.debug('Unexpected packet type; packet dropped')
 
-            # Reject all other sequence numbers
             else:
-                FileServer.debug('Unexpected sequence number; packet dropped (expected '
-                                 + str(self.threads[threading.current_thread()][0])
-                                 + ")")
+                # If ACK packet, send all potentially misreceived packets again
+                if pkt_type == packet.PKT_TYPE['ACK']:
+                    FileServer.debug('Received cumulative ACK packet')
+                    for pkt_send in self.window_send:
+                        if pkt_send.seq_num >= pkt_type:
+                            print('resending pkt #' + str(pkt_send.seq_num))
+                            self.send_resp_pkt(origin, pkt_send)
+                        else:
+                            # Older packets can be safely removed from sending window
+                            self.window_send.remove(pkt)
+
+                # Address NAK packet
+                elif pkt_type == packet.PKT_TYPE['NAK']:
+                    FileServer.debug('Received NAK packet')
+                    self.send_resp_pkt(origin, self.pkt_send(seq_num))
+
+                # Otherwise, send ACK of last successfully received, in-order packet
+                else:
+                    # Accept out-of-order DATA packets; reorder them later
+                    if pkt_type == packet.PKT_TYPE['DATA']\
+                            and pkt not in self.window_recv:
+                        self.window_recv.append(pkt)
+                    FileServer.debug('Unexpected sequence number (expected '
+                                     + str(self.threads[threading.current_thread()][0])
+                                     + ")")
+                    last = self.last_inorder()
+                    if last is not None:
+                        self.send_ack(origin, dest, last)
 
             # Receive next packet
             raw, origin = self.sock.recvfrom(BUFFER_SIZE)
@@ -189,7 +237,7 @@ class FileServer:
                 self.handle(pkt, origin)
 
         except socket.timeout:
-            FileServer.debug('Connection timed out')
+            FileServer.debug('Connection timed out; assume end of communication')
             # Clean up thread
             self.threads.pop(threading.current_thread())
 
@@ -200,7 +248,7 @@ class FileServer:
                                peer_ip=dest[0],
                                peer_port=dest[1],
                                data='')
-        FileServer.debug('Built packet:\r\n' + DIVIDER + '\r\n' + str(pkt), True)
+        FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
         # Update expected packet sequence number
         self.threads[threading.current_thread()][0] += 2 * packet.PKT_MIN
@@ -210,6 +258,22 @@ class FileServer:
         FileServer.debug('Packet sent to router at: ' + str(origin[0])
                          + ':' + str(origin[1])
                          + ' (size = ' + str(len(pkt.data)) + ')')
+
+    def send_ack(self, origin, dest, last=None):
+        # Generate ACK packet
+        if last is not None:
+            pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
+                                   seq_num=last.seq_num,
+                                   peer_ip=dest[0],
+                                   peer_port=dest[1],
+                                   data='')
+            FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
+
+            # Send packet
+            self.sock.sendto(pkt.to_bytes(), origin)
+            FileServer.debug('Packet sent to router at: ' + str(origin[0])
+                             + ':' + str(origin[1])
+                             + ' (size = ' + str(len(pkt.data)) + ')')
 
     def parse(self, origin, dest, rqst):
         lines = rqst.split('\r\n')
@@ -423,7 +487,7 @@ class FileServer:
                     # Decrement number of readers
                     if reading:
                         self.locks_read[path] -= 1
-                        FileServer.debug('Released lock to read fromm file \'' + path + '\'')
+                        FileServer.debug('Released lock to read from file \'' + path + '\'')
 
                 # Last modification date
                 stats = os.stat(path[1:path_end])
@@ -528,16 +592,17 @@ class FileServer:
                 self.send_resp(origin, dest, resp)
 
     def send_resp(self, origin, dest, resp):
-        # Determine how many packets need to be sent
-        num_pkts = math.ceil(len(str(resp)) / packet.PKT_MAX)
         buffer = ''
         left_to_send = Response.to_str(resp)
-        self.debug('Sending ' + str(num_pkts) + ' packets')
+
+        # Determine how many packets need to be sent
+        num_pkts = math.ceil(len(left_to_send) / (packet.PKT_MAX - packet.PKT_MIN))
+        FileServer.debug('Sending ' + str(num_pkts) + ' packet(s)')
 
         while len(left_to_send) > 0:
             # Use a buffer to split the request into as many packets as needed
             for char in left_to_send:
-                if len(buffer) < (packet.PKT_MAX - 11):
+                if len(buffer) < (packet.PKT_MAX - packet.PKT_MIN):
                     buffer += char
 
             pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
@@ -547,10 +612,10 @@ class FileServer:
                                    data=buffer)
 
             left_to_send = left_to_send[len(buffer):]
-            buffer = ''
-            self.threads[threading.current_thread()][0] += packet.PKT_MIN + len(buffer)
+            self.threads[threading.current_thread()][1] += packet.PKT_MIN + len(buffer)
             self.window_send.append(pkt)
             FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
+            buffer = ''
 
         # Send window to server
         for pkt in self.window_send:

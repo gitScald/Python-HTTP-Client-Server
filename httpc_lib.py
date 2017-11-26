@@ -130,6 +130,31 @@ class HTTPClient:
         else:
             logging.debug(message)
 
+    def last_inorder(self):
+        # Return last in-order packet successfully received
+        largest = 0
+        for pkt in self.window_recv:
+            if self.curr_recv > pkt.seq_num > largest:
+                largest = pkt.seq_num
+
+        return self.pkt_recv(largest)
+
+    def pkt_recv(self, num):
+        # Find a packet with the given sequence number in the receiving window
+        for pkt in self.window_recv:
+            if pkt.seq_num == num:
+                return pkt
+
+        return None
+
+    def pkt_send(self, num):
+        # Find a packet with the given sequence number in the sending window
+        for pkt in self.window_send:
+            if pkt.seq_num == num:
+                return pkt
+
+        return None
+
     def init(self):
         # Determine whether the given host address is in IP or URL format
         valid = True
@@ -198,13 +223,20 @@ class HTTPClient:
                          + ':' + str(self.router[1])
                          + ' (size = ' + str(len(pkt.data)) + ')')
 
-    def send_ack(self):
+    def send_ack(self, last=None):
         # Generate ACK packet
-        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
-                               seq_num=self.curr_send,
-                               peer_ip=self.server_addr,
-                               peer_port=self.server_port,
-                               data='')
+        if last is not None:
+            pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
+                                   seq_num=last.seq_num,
+                                   peer_ip=self.server_addr,
+                                   peer_port=self.server_port,
+                                   data='')
+        else:
+            pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
+                                   seq_num=self.curr_send,
+                                   peer_ip=self.server_addr,
+                                   peer_port=self.server_port,
+                                   data='')
         HTTPClient.debug('Built packet:\r\n\r\n' + str(pkt), True)
 
         # Send packet and update sequence numbers
@@ -254,16 +286,17 @@ class HTTPClient:
         return rqst
 
     def send_rqst(self, rqst):
-        # Determine how many packets need to be sent
-        num_pkts = math.ceil(len(str(rqst)) / packet.PKT_MAX)
         buffer = ''
         left_to_send = str(rqst)
-        self.debug('Sending ' + str(num_pkts) + ' packets')
+
+        # Determine how many packets need to be sent
+        num_pkts = math.ceil(len(left_to_send) / (packet.PKT_MAX - packet.PKT_MIN))
+        HTTPClient.debug('Sending ' + str(num_pkts) + ' packet(s)')
 
         while len(left_to_send) > 0:
             # Use a buffer to split the request into as many packets as needed
             for char in left_to_send:
-                if len(buffer) < (packet.PKT_MAX - 11):
+                if len(buffer) < (packet.PKT_MAX - packet.PKT_MIN):
                     buffer += char
 
             pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
@@ -298,9 +331,9 @@ class HTTPClient:
 
         # Packet reception
         if raw is not None:
-            self.recv_pkt(raw, origin)
+            self.recv_pkt(raw)
 
-    def recv_pkt(self, raw, origin):
+    def recv_pkt(self, raw):
         # Extract packet information
         pkt = packet.UDPPacket.from_bytes(raw=raw)
         self.window_recv.append(pkt)
@@ -310,37 +343,62 @@ class HTTPClient:
             with open(self.output, 'a') as file:
                 file.write(pkt.data)
 
+        # Extract packet information
+        pkt_type = pkt.pkt_type
+        seq_num = pkt.seq_num
+        data = pkt.data
+
         # Check packet sequence number
-        if pkt.seq_num == self.curr_recv:
+        if seq_num == self.curr_recv:
             # Handle SYN-ACK packet
-            if pkt.pkt_type == packet.PKT_TYPE['SYN-ACK']:
-                HTTPClient.debug('Received SYN-ACK packet')
+            if pkt_type == packet.PKT_TYPE['SYN-ACK']:
+                HTTPClient.debug('Handshake accepted')
                 self.connected = True
 
             # Handle ACK packet
-            elif pkt.pkt_type == packet.PKT_TYPE['ACK']:
+            elif pkt_type == packet.PKT_TYPE['ACK']:
                 # Slide window down
-                HTTPClient.debug('Received ACK packet')
-
-            # Handle NAK packet
-            elif pkt.pkt_type == packet.PKT_TYPE['NAK']:
-                # Resend packet dispatched to this thread
-                HTTPClient.debug('Received NAK packet')
+                HTTPClient.debug('Completing handshake')
+                self.curr_recv += packet.PKT_MIN
 
             # Handle DATA packet
-            elif pkt.pkt_type == packet.PKT_TYPE['DATA']:
+            elif pkt_type == packet.PKT_TYPE['DATA']:
                 # Extract packet data and slide window
-                HTTPClient.debug('Received DATA packet')
+                self.curr_recv += packet.PKT_MIN + len(data)
 
-            # Reject all other packet types
+            # Send ACK of last successfully received, in-order packet
             else:
-                HTTPClient.debug('Unexpected packet type; packet dropped')
+                HTTPClient.debug('Unexpected sequence number (expected '
+                                 + str(self.curr_recv)
+                                 + ")")
+                last = self.last_inorder()
+                if last is not None:
+                    self.send_ack(last)
 
-        # Reject all other sequence numbers
         else:
-            HTTPClient.debug('Unexpected sequence number; packet dropped (expected '
-                             + str(self.curr_recv)
-                             + ')')
+            # If ACK packet, send all potentially misreceived packets again
+            if pkt_type == packet.PKT_TYPE['ACK']:
+                HTTPClient.debug('Received ACK packet')
+                for pkt_send in self.window_send:
+                    if pkt_send.seq_num >= pkt_type:
+                        self.send_rqst_pkt(pkt_send)
+                    else:
+                        # Older packets can be safely removed from sending window
+                        self.window_send.remove(pkt_send)
+
+            # Address NAK packet
+            elif pkt_type == packet.PKT_TYPE['NAK']:
+                HTTPClient.debug('Received NAK packet')
+                self.send_rqst_pkt(self.pkt_send(seq_num))
+
+            # Otherwise, send ACK of last successfully received, in-order packet
+            else:
+                HTTPClient.debug('Unexpected sequence number (expected '
+                                 + str(self.curr_recv)
+                                 + ")")
+                last = self.last_inorder()
+                if last is not None:
+                    self.send_ack(last)
 
     def run(self):
         # Build request
@@ -351,7 +409,7 @@ class HTTPClient:
                 # Try establishing a connection
                 self.send_syn()
 
-                # Wait for a SYN-ACK packet is received
+                # Wait for a SYN-ACK packet
                 self.recv()
 
             # Handle timeout
@@ -363,7 +421,6 @@ class HTTPClient:
                     HTTPClient.debug('Closing socket')
                     self.socket.close()
 
-            # Once handshaking is done, the request can be sent
             if self.connected:
                 try:
                     # First send an ACK to complete 3-way handshake
@@ -378,7 +435,7 @@ class HTTPClient:
 
                 # Handle timeout
                 except socket.timeout:
-                    HTTPClient.debug('Connection timed out; assume end of transmission')
+                    HTTPClient.debug('Connection timed out; assume end of communication')
 
                 finally:
                     if self.socket is not None:
