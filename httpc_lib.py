@@ -350,15 +350,28 @@ class HTTPClient:
 
         # Check packet sequence number
         if seq_num == self.curr_recv:
+
             # Handle SYN-ACK packet
             if pkt_type == packet.PKT_TYPE['SYN-ACK']:
                 HTTPClient.debug('Handshake accepted')
+                # Add received packet to receiving window
+                if pkt not in self.window_recv:
+                    self.window_recv.append(pkt)
                 self.connected = True
 
             # Handle DATA packet
             elif pkt_type == packet.PKT_TYPE['DATA']:
-                # Extract packet data and slide window
                 self.curr_recv += packet.PKT_MIN + len(data)
+                # Add received packet to receiving window
+                if pkt not in self.window_recv:
+                    self.window_recv.append(pkt)
+                # Remove SYN-ACK packet from receiving window
+                self.window_recv.remove(self.pkt_recv(2 * packet.PKT_MIN))
+
+                # Older packets can be safely removed from sending window
+                for pkt_send in self.window_send:
+                    if pkt_send.seq_num < seq_num:
+                        self.window_send.remove(pkt_send)
 
             # Send ACK of last successfully received, in-order packet
             else:
@@ -376,20 +389,28 @@ class HTTPClient:
 
                 # Resolve missing handshake ACK packet
                 if seq_num == packet.PKT_MIN:
+                    print('**** resending ACK packet')
                     self.send_ack()
 
-                else:
-                    for pkt_send in self.window_send:
-                        if pkt_send.seq_num >= pkt_type:
-                            self.send_rqst_pkt(pkt_send)
-                        else:
-                            # Older packets can be safely removed from sending window
-                            self.window_send.remove(pkt_send)
+                # Resend missing DATA packets
+                time.sleep(1)
+                for pkt_send in self.window_send:
+                    if pkt_send.seq_num >= seq_num:
+                        print('**** resending pkt #' + str(pkt_send.seq_num))
+                        self.send_rqst_pkt(pkt_send)
+                    else:
+                        # Older packets can be safely removed from sending window
+                        self.window_send.remove(pkt_send)
 
             # Address NAK packet
             elif pkt_type == packet.PKT_TYPE['NAK']:
                 HTTPClient.debug('Received NAK packet')
                 self.send_rqst_pkt(self.pkt_send(seq_num))
+
+                # Older packets can be safely removed from sending window
+                for pkt_send in self.window_send:
+                    if pkt_send.seq_num < seq_num:
+                        self.window_send.remove(pkt_send)
 
             # Otherwise, send ACK of last successfully received, in-order packet
             else:
