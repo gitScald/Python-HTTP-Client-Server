@@ -6,6 +6,7 @@ import socket
 import time
 
 BUFFER_SIZE = 1024
+DATA_TIMEOUT = 1
 DIVIDER = '-' * 80
 ENCODING = 'utf-8'
 HTTP_VERSION = 'HTTP/1.1'
@@ -22,13 +23,13 @@ REGEX = {'IP_PORT': r'^(?P<host>((http|https):\/{2})?(?P<ip>(\d{1,3}\.){3}\d{1,3
          'URL_PORT': r'^(?P<host>((http|https):\/{2})?(w{3}\.)?\w+\.\w+)(:?(?P<port>\d+)?)'}
 
 logging.basicConfig(level=logging.DEBUG,
-                    format='(%(threadName)-12s) %(message)s')
+                    format='(%(asctime)-23s) (%(threadName)-12s) %(message)s')
 
 
 class Request:
     def __init__(self,
                  rqst_type,
-                 host=(),
+                 host=tuple(),
                  path='/',
                  headers=None,
                  data_type='',
@@ -114,12 +115,14 @@ class HTTPClient:
         self.server = None
         self.socket = None
         self.timeout = 5 if timeout is None else timeout
-        self.router = ()
+        self.router = tuple()
         self.connected = False
         self.curr_send = 0
         self.curr_recv = 0
-        self.window_send = []
-        self.window_recv = []
+        self.window_send = list()
+        self.window_recv = list()
+        self.t_start = 0
+        self.t_end = 0
 
         # Initialize client
         self.init()
@@ -354,6 +357,7 @@ class HTTPClient:
             # Handle SYN-ACK packet
             if pkt_type == packet.PKT_TYPE['SYN-ACK']:
                 HTTPClient.debug('Handshake accepted')
+
                 # Add received packet to receiving window
                 if pkt not in self.window_recv:
                     self.window_recv.append(pkt)
@@ -365,6 +369,10 @@ class HTTPClient:
                 # Add received packet to receiving window
                 if pkt not in self.window_recv:
                     self.window_recv.append(pkt)
+
+                    # Start a timer before sending ACK indicating proper reception
+                    self.t_start = time.time()
+
                 # Remove SYN-ACK packet from receiving window
                 self.window_recv.remove(self.pkt_recv(2 * packet.PKT_MIN))
 
@@ -389,14 +397,13 @@ class HTTPClient:
 
                 # Resolve missing handshake ACK packet
                 if seq_num == packet.PKT_MIN:
-                    print('**** resending ACK packet')
+                    HTTPClient.debug('Resending handshake ACK packet')
                     self.send_ack()
 
                 # Resend missing DATA packets
-                time.sleep(1)
                 for pkt_send in self.window_send:
                     if pkt_send.seq_num >= seq_num:
-                        print('**** resending pkt #' + str(pkt_send.seq_num))
+                        HTTPClient.debug('Resending packet #' + str(pkt_send.seq_num))
                         self.send_rqst_pkt(pkt_send)
                     else:
                         # Older packets can be safely removed from sending window
@@ -445,21 +452,44 @@ class HTTPClient:
             if self.connected:
                 try:
                     # First send an ACK to complete 3-way handshake
-                    time.sleep(1)
                     self.send_ack()
                     self.curr_send += packet.PKT_MIN
 
                     # Send request and wait for a response
-                    time.sleep(1)
                     self.send_rqst(rqst)
 
                     while True:
                         # Receive server packet(s)
                         self.recv()
 
-                # Handle timeout
+                # Handle timeout by asking for packets again
                 except socket.timeout:
-                    HTTPClient.debug('Connection timed out; assume end of communication')
+                    last = self.last_inorder()
+                    if last is not None:
+                        self.send_ack(last)
+                        HTTPClient.debug('Connection timed out; requesting packets from #'
+                                         + str(last.seq_num))
+
+                        try:
+                            while True:
+                                # Receive server packet(s)
+                                self.recv()
+                                self.t_end = time.time()
+
+                                # If timer runs out, send ACK indicating good reception
+                                if self.t_end - self.t_start > DATA_TIMEOUT:
+                                    last = self.last_inorder()
+                                    if last is not None:
+                                        self.send_ack(last)
+                                        HTTPClient.debug('Sending ACK packet indicating reception (#'
+                                                         + str(last.seq_num) + ')')
+
+                        # After second timeout, assume server will not respond anymore
+                        except socket.timeout:
+                            HTTPClient.debug('Connection timed out; assume end of communication')
+
+                    else:
+                        HTTPClient.debug('Connection timed out; assume end of communication')
 
                 finally:
                     if self.socket is not None:

@@ -1,3 +1,3 @@
-- sliding window
+=> extra ACK 33 from server after completed handshake?
 - need to implement NAK & properly address ACK repeats
 - 1-script test?

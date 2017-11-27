@@ -12,7 +12,7 @@ import threading
 import time
 
 logging.basicConfig(level=logging.DEBUG,
-                    format='(%(threadName)-12s) %(message)s')
+                    format='(%(asctime)-23s) (%(threadName)-12s) %(message)s')
 
 BUFFER_SIZE = 1024
 DIVIDER = '-' * 80
@@ -57,11 +57,12 @@ class FileServer:
         self.active = True
         self.cwd = os.getcwd()
         self.delay = THREAD_DELAY if args.w else 0
-        self.host = ''
-        self.locks_read = {}
-        self.locks_write = {}
+        self.host = '0.0.0.0'
+        self.locks_read = dict()
+        self.locks_write = dict()
         self.port = args.p
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.clients = list()
         self.threads = dict()
         self.timeout = 1
         self.wdir = os.path.join(self.cwd, args.d) if args.d is not None else self.cwd
@@ -130,9 +131,12 @@ class FileServer:
                         pkt = packet.UDPPacket.from_bytes(raw=raw)
 
                         # Handle new 'connections':
+                        peer = (pkt.peer_ip, pkt.peer_port)
                         if pkt.pkt_type == packet.PKT_TYPE['SYN']\
-                                and pkt.seq_num == packet.PKT_MIN:
+                                and pkt.seq_num == packet.PKT_MIN\
+                                and peer not in self.clients:
                             name = 'Connection-' + str(len(self.threads))
+                            self.clients.append(peer)
 
                             # Each new connection is handled by a separate thread
                             t = threading.Thread(name=name,
@@ -159,7 +163,6 @@ class FileServer:
         self.exit()
 
     def handle(self, pkt, origin):
-        print('***** handle called')
         # Print packet contents
         FileServer.debug('Received packet:\r\n\r\n' + str(pkt), True)
 
@@ -187,11 +190,10 @@ class FileServer:
                 elif pkt_type == packet.PKT_TYPE['ACK']:
                     FileServer.debug('Handshake complete')
                     self.threads[threading.current_thread()]['CURR_RECV'] += packet.PKT_MIN
+
                     # Add received packet to receiving window
                     if pkt not in self.threads[threading.current_thread()]['WNDW_RECV']:
                         self.threads[threading.current_thread()]['WNDW_RECV'].append(pkt)
-                    # Remove SYN packet from receiving window
-                    self.threads[threading.current_thread()]['WNDW_RECV'].remove(self.pkt_recv(packet.PKT_MIN))
 
                     # Older packets can be safely removed from sending window
                     for pkt_send in self.threads[threading.current_thread()]['WNDW_SEND']:
@@ -201,9 +203,13 @@ class FileServer:
                 # Address DATA packet and parse client request
                 elif pkt_type == packet.PKT_TYPE['DATA']:
                     self.threads[threading.current_thread()]['CURR_SEND'] = seq_num + packet.PKT_MIN + len(data)
+
                     # Add received packet to receiving window
                     if pkt not in self.threads[threading.current_thread()]['WNDW_RECV']:
                         self.threads[threading.current_thread()]['WNDW_RECV'].append(pkt)
+
+                    # Remove handshake ACK packet from receiving window
+                    self.threads[threading.current_thread()]['WNDW_RECV'].remove(self.pkt_recv(3 * packet.PKT_MIN))
                     self.parse(origin, dest, data)
 
                 # Reject all other packet types
@@ -211,16 +217,26 @@ class FileServer:
                     FileServer.debug('Unexpected packet type; packet dropped')
 
             else:
-                # If ACK packet, send all potentially misreceived packets again
-                time.sleep(1)
                 if pkt_type == packet.PKT_TYPE['ACK']:
-                    FileServer.debug('Received cumulative ACK packet')
-                    for pkt_send in self.threads[threading.current_thread()]['WNDW_SEND']:
-                        if pkt_send.seq_num >= pkt_type:
-                            self.send_resp_pkt(origin, pkt_send)
-                        else:
-                            # Older packets can be safely removed from sending window
-                            self.threads[threading.current_thread()]['WNDW_SEND'].remove(pkt)
+
+                    # If the sequence number is lower than the last sent packet, resend
+                    if seq_num < max(pkt_send.seq_num
+                                     for pkt_send
+                                     in self.threads[threading.current_thread()]['WNDW_SEND']):
+                        FileServer.debug('Received cumulative ACK packet')
+                        for pkt_send in self.threads[threading.current_thread()]['WNDW_SEND']:
+                            if pkt_send.seq_num >= pkt_type:
+                                self.debug('Resending packet #' + str(pkt_send.seq_num))
+                                self.send_resp_pkt(origin, pkt_send)
+
+                            else:
+                                # Older packets can be safely removed from sending window
+                                self.threads[threading.current_thread()]['WNDW_SEND'].remove(pkt)
+
+                    # Otherwise, client properly received packets, safe to close connection
+                    else:
+                        FileServer.debug('Received ACK packet indicating reception, will close connection')
+                        self.close_connection(pkt)
 
                 # Address NAK packet
                 elif pkt_type == packet.PKT_TYPE['NAK']:
@@ -247,17 +263,38 @@ class FileServer:
 
             # Receive next packet
             self.sock.settimeout(SOCK_TIMEOUT)
-            print('**** waiting on next packet')
             raw, origin = self.sock.recvfrom(BUFFER_SIZE)
             if raw is not None:
-                print('**** next packet recved')
                 pkt = packet.UDPPacket.from_bytes(raw)
                 self.handle(pkt, origin)
 
+        # Handle timeout by asking for packets again
         except socket.timeout:
-            FileServer.debug('Connection timed out; assume end of communication')
-            # Clean up thread
-            self.threads.pop(threading.current_thread())
+            last = self.last_inorder()
+            if last is not None:
+                self.send_ack(origin, dest, last)
+                FileServer.debug('Connection timed out; requesting packets from #'
+                                 + str(last.seq_num))
+
+                try:
+                    while True:
+                        # Receive client packet(s)
+                        raw, origin = self.sock.recvfrom(BUFFER_SIZE)
+                        if raw is not None:
+                            pkt = packet.UDPPacket.from_bytes(raw)
+                            self.handle(pkt, origin)
+
+                # After second timeout, assume client will not respond anymore
+                except socket.timeout:
+                    FileServer.debug('Connection timed out; assume end of communication')
+
+                    # Clean up thread
+                    peer = (pkt.peer_ip, pkt.peer_port)
+                    self.clients.remove(peer)
+                    self.threads.pop(threading.current_thread())
+
+            else:
+                FileServer.debug('Connection timed out; assume end of communication')
 
     def send_synack(self, origin, dest):
         # Generate SYN-ACK packet
@@ -294,6 +331,15 @@ class FileServer:
             FileServer.debug('Packet sent to router at: ' + str(origin[0])
                              + ':' + str(origin[1])
                              + ' (size = ' + str(len(pkt.data)) + ')')
+
+    def close_connection(self, pkt):
+        # Gracefully close connection after successful transfer
+        FileServer.debug('Closing connection after successful transfer...')
+
+        # Clean up thread
+        peer = (pkt.peer_ip, pkt.peer_port)
+        self.clients.remove(peer)
+        self.threads.pop(threading.current_thread())
 
     def parse(self, origin, dest, rqst):
         lines = rqst.split('\r\n')
@@ -414,6 +460,7 @@ class FileServer:
             if extension == 'html':
                 # HTML files will be suggested for viewing in a browser
                 return 'Content-Disposition: inline'
+
             else:
                 # Grab the fully qualified file name
                 dir_index = path.rfind('/') + 1
@@ -574,7 +621,6 @@ class FileServer:
                 while self.locks_read[path] > 0:
                     FileServer.debug('Reader thread(s) holding the lock to file \''
                                      + path + '\'')
-                    time.sleep(1)
 
                 # Acquire lock to write to the file
                 self.locks_write[path].clear()
@@ -582,6 +628,7 @@ class FileServer:
 
                 # Write contents to file
                 created = False
+
                 # Check if the file already exists
                 path_full = self.wdir + path
                 if not os.path.isfile(path_full):
