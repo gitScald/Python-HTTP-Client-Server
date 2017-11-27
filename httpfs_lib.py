@@ -18,7 +18,7 @@ BUFFER_SIZE = 1024
 DIVIDER = '-' * 80
 ENCODING = 'utf-8'
 HTTP_VERSION = 'HTTP/1.1'
-SOCK_TIMEOUT = 5
+SOCK_TIMEOUT = 10
 THREAD_DELAY = 10
 WINDOW_SIZE = pow(2, 31)
 
@@ -235,8 +235,9 @@ class FileServer:
 
                     # Otherwise, client properly received packets, safe to close connection
                     else:
-                        FileServer.debug('Received ACK packet indicating reception, will close connection')
-                        self.close_connection(pkt)
+                        if seq_num > 2 * packet.PKT_MIN:
+                            FileServer.debug('Received ACK packet indicating reception, will close connection')
+                            self.close_connection(pkt)
 
                 # Address NAK packet
                 elif pkt_type == packet.PKT_TYPE['NAK']:

@@ -479,7 +479,8 @@ class HTTPClient:
                                 # If timer runs out, send ACK indicating good reception
                                 if self.t_end - self.t_start > DATA_TIMEOUT:
                                     last = self.last_inorder()
-                                    if last is not None:
+                                    if last is not None\
+                                        and last.pkt_type == packet.PKT_TYPE['DATA']:
                                         self.send_ack(last)
                                         HTTPClient.debug('Sending ACK packet indicating reception (#'
                                                          + str(last.seq_num) + ')')
