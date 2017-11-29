@@ -1,0 +1,29 @@
+# Simple directory GET:
+./router_x86
+py httpfs.py -v
+py httpc.py get -v [HOST:PORT]/
+
+# Request large object via GET:
+./router_x86
+py httpfs.py -v
+py httpc.py get -v [HOST:PORT]/public/large.txt
+
+# POST large object:
+./router_x86
+py httpfs.py -v
+py httpc.py post -v -f public/large.txt [HOST:PORT]/public/post.txt
+
+# Request large object via GET, with delay:
+./router_x86 --max-delay=1s
+py httpfs.py -v
+py httpc.py get -v [HOST:PORT]/public/large.txt
+
+# Request large object via GET, with loss:
+./router_x86 --drop-rate=0.5 --seed 1511920193703324300
+py httpfs.py -v
+py httpc.py get -v [HOST:PORT]/public/large.txt
+
+# Request large object via GET, with delay and loss:
+./router_x86 --max-delay=1s --drop-rate=0.5 --seed 1511920193703324300
+py httpfs.py -v
+py httpc.py get -v [HOST:PORT]/public/large.txt

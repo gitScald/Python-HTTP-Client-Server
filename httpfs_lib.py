@@ -4,6 +4,7 @@ import math
 import os
 import os.path
 import packet
+import random
 import re
 import socket
 import stat
@@ -18,9 +19,9 @@ BUFFER_SIZE = 1024
 DIVIDER = '-' * 80
 ENCODING = 'utf-8'
 HTTP_VERSION = 'HTTP/1.1'
-SOCK_TIMEOUT = 10
-THREAD_DELAY = 10
-WINDOW_SIZE = pow(2, 31)
+SOCK_TIMEOUT = 2
+THREAD_DELAY = 3
+WINDOW_SIZE = 4
 
 CMD = {'GET': 'GET',
        'POST': 'POST'}
@@ -54,17 +55,18 @@ STATUS_CODES = {'OK': '200 OK',
 
 class FileServer:
     def __init__(self, args):
-        self.active = True
+        # self.active = True
         self.cwd = os.getcwd()
         self.delay = THREAD_DELAY if args.w else 0
         self.host = '0.0.0.0'
+        self.router = tuple()
         self.locks_read = dict()
         self.locks_write = dict()
         self.port = args.p
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.clients = list()
         self.threads = dict()
-        self.timeout = 1
+        self.timeout = SOCK_TIMEOUT
         self.wdir = os.path.join(self.cwd, args.d) if args.d is not None else self.cwd
 
         # Turn off logging if verbosity is set to False
@@ -80,36 +82,12 @@ class FileServer:
         else:
             logging.debug(message)
 
-    def last_inorder(self):
-        # Return last in-order packet successfully received
-        largest = 0
-        for pkt in self.threads[threading.current_thread()]['WNDW_RECV']:
-            if self.threads[threading.current_thread()]['CURR_RECV'] > pkt.seq_num > largest:
-                largest = pkt.seq_num
-
-        return self.pkt_recv(largest)
-
-    def pkt_recv(self, num):
-        # Find a packet with the given sequence number in the receiving window
-        for pkt in self.threads[threading.current_thread()]['WNDW_RECV']:
-            if pkt.seq_num == num:
-                return pkt
-
-        return None
-
-    def pkt_send(self, num):
-        # Find a packet with the given sequence number in the sending window
-        for pkt in self.threads[threading.current_thread()]['WNDW_SEND']:
-            if pkt.seq_num == num:
-                return pkt
-
-        return None
-
     def init(self):
         FileServer.debug('Starting server...')
         FileServer.debug('Working directory: ' + self.wdir)
 
         self.host = socket.gethostbyname(socket.gethostname())
+        self.router = (self.host, 3000)
         FileServer.debug('Host name: ' + self.host + ':' + str(self.port))
 
         self.sock.bind((self.host, self.port))
@@ -122,233 +100,280 @@ class FileServer:
         self.run()
 
     def run(self):
-        while self.active:
-            try:
-                try:
-                    # Receive packet
-                    raw, origin = self.sock.recvfrom(BUFFER_SIZE)
-                    if raw is not None:
-                        pkt = packet.UDPPacket.from_bytes(raw=raw)
+        # while self.active:
+        try:
+            # self.sock.settimeout(0.1)
+            raw, origin = self.sock.recvfrom(BUFFER_SIZE)
+            pkt = packet.UDPPacket.from_bytes(raw=raw)
+            peer = (pkt.peer_ip, pkt.peer_port)
 
-                        # Handle new 'connections':
-                        peer = (pkt.peer_ip, pkt.peer_port)
-                        if pkt.pkt_type == packet.PKT_TYPE['SYN']\
-                                and pkt.seq_num == packet.PKT_MIN\
-                                and peer not in self.clients:
-                            name = 'Connection-' + str(len(self.threads))
-                            self.clients.append(peer)
+            if pkt.pkt_type == packet.PKT_TYPE['SYN']\
+                    and peer not in self.clients:
+                name = 'Connection-' + str(len(self.threads))
+                t = threading.Thread(name=name,
+                                     target=self.handle,
+                                     args=(pkt,))
+                self.threads[t] = {'CLIENT': tuple(),
+                                   'WNDW_RECV': list(),
+                                   'WNDW_SEND': list()}
+                t.start()
+                FileServer.debug('Active connections: ' + str(len(self.threads)))
 
-                            # Each new connection is handled by a separate thread
-                            t = threading.Thread(name=name,
-                                                 target=self.handle,
-                                                 args=(pkt, origin))
+        except socket.timeout:
+            pass
 
-                            self.threads[t] = {'CURR_RECV': packet.PKT_MIN,
-                                               'CURR_SEND': 2 * packet.PKT_MIN,
-                                               'WNDW_RECV': list(),
-                                               'WNDW_SEND': list()}
-                            t.start()
-                            FileServer.debug('Active connections: ' + str(len(self.threads)))
-
-                # Do nothing on timeout
-                except socket.timeout:
-                    pass
-
-            # Following a keyboard interrupt, stop accepting new connections and exit
-            except KeyboardInterrupt:
-                FileServer.debug('Server shutting down...')
-                self.active = False
-                self.sock.settimeout(None)
+        except KeyboardInterrupt:
+            FileServer.debug('Server shutting down...')
+            # self.active = False
 
         self.exit()
 
-    def handle(self, pkt, origin):
-        # Print packet contents
-        FileServer.debug('Received packet:\r\n\r\n' + str(pkt), True)
+    def handle(self, syn_pkt):
+        FileServer.debug('Received SYN packet #' + str(syn_pkt.seq_num))
+        time.sleep(0.5)
+        synack = self.send_synack(syn_pkt)
+        client = self.recv_handshake_ack(synack, syn_pkt)
 
-        # Extract packet information
-        pkt_type = pkt.pkt_type
-        seq_num = pkt.seq_num
-        peer_ip = pkt.peer_ip
-        peer_port = pkt.peer_port
-        dest = (peer_ip, peer_port)
-        data = pkt.data
+        if client is not None:
+            peer = (syn_pkt.peer_ip, syn_pkt.peer_port)
+            self.clients.append(peer)
+            pkts = self.recv_data(client)
+
+            buffer = ''
+            if pkts is not None:
+                buffer = ''
+                pkts.sort(key=lambda p: p.seq_num)
+                for pkt in pkts:
+                    if pkt.data != '/ END OF TRANSMISSION /':
+                        buffer += pkt.data
+            FileServer.debug('Data received:\r\n\r\n' + buffer + '\r\n\r\n')
+
+            resp = self.parse(buffer)
+            pkts = self.make_pkts(client, resp)
+            self.send_data(pkts)
+            self.clients.remove(client)
+
+    def send_synack(self, syn_pkt):
+        synack = random.randint(0, 100)
+        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['SYN-ACK'],
+                               seq_num=synack,
+                               peer_ip=syn_pkt.peer_ip,
+                               peer_port=syn_pkt.peer_port,
+                               data=str(syn_pkt.seq_num))
+        FileServer.debug('Sending SYN-ACK packet #' + str(pkt.seq_num))
+        self.sock.sendto(pkt.to_bytes(), self.router)
+
+        return synack
+
+    def recv_handshake_ack(self, synack, syn_pkt):
+        synack_ = synack
+        self.sock.settimeout(SOCK_TIMEOUT)
+
+        while True:
+            try:
+                raw, origin = self.sock.recvfrom(BUFFER_SIZE)
+                pkt = packet.UDPPacket.from_bytes(raw)
+                if pkt.pkt_type == packet.PKT_TYPE['ACK'] and int(pkt.seq_num) == synack_:
+                    FileServer.debug('Received handshake ACK packet #' + str(pkt.seq_num))
+                    self.threads[threading.current_thread()]['CLIENT'] = (pkt.peer_ip, pkt.peer_port)
+                    return self.threads[threading.current_thread()]['CLIENT']
+
+                elif pkt.pkt_type == packet.PKT_TYPE['DATA']:
+                    FileServer.debug('Received DATA packet; requesting another handshake packet')
+                    synack_ = self.send_synack(syn_pkt)
+                    self.sock.settimeout(SOCK_TIMEOUT + 1)
+
+            except socket.timeout:
+                FileServer.debug('Timed out; will resend SYN-ACK packet')
+                synack_ = self.send_synack(syn_pkt)
+                self.sock.settimeout(SOCK_TIMEOUT + 1)
+
+    def recv_data(self, client):
+        pkts = list()
+        seq_nums = {0, 1, 2, 3}
+        received = False
+
+        while not received:
+            try:
+                self.sock.settimeout(SOCK_TIMEOUT)
+                raw, origin = self.sock.recvfrom(BUFFER_SIZE)
+                pkt = packet.UDPPacket.from_bytes(raw)
+                if pkt.pkt_type == packet.PKT_TYPE['DATA']:
+                    FileServer.debug('Received DATA packet #' + str(pkt.seq_num))
+
+                    if pkt.seq_num in seq_nums\
+                            and pkt.seq_num not in [rcv.seq_num for rcv in self.threads[threading.current_thread()]['WNDW_RECV']]:
+                        pkts.append(pkt)
+                        if len(self.threads[threading.current_thread()]['WNDW_RECV']) < WINDOW_SIZE:
+                            self.threads[threading.current_thread()]['WNDW_RECV'].append(pkt)
+
+                    if len(self.threads[threading.current_thread()]['WNDW_RECV']) == WINDOW_SIZE:
+                        FileServer.debug('Receiving window full, sliding down')
+                        for pkt_rcvd in self.threads[threading.current_thread()]['WNDW_RECV']:
+                            self.send_ack(pkt_rcvd.seq_num, client)
+                        seq_nums = set(seq_num + WINDOW_SIZE for seq_num in seq_nums)
+                        self.threads[threading.current_thread()]['WNDW_RECV'].clear()
+
+                    if pkt.data == '/ END OF TRANSMISSION /':
+                        FileServer.debug('Received end of transmission #' + str(pkt.seq_num))
+                        seq_nums = set(seq_num for seq_num in seq_nums if seq_num <= pkt.seq_num)
+                        rcv_nums = set(rcv.seq_num for rcv in pkts)
+                        all_nums = set(range(pkt.seq_num))
+                        matches = all_nums - rcv_nums
+                        if len(matches) == 0:
+                            for pkt_rcvd in self.threads[threading.current_thread()]['WNDW_RECV']:
+                                self.send_ack(pkt_rcvd.seq_num, client)
+                            self.threads[threading.current_thread()]['WNDW_RECV'].clear()
+                            received = True
+
+            except socket.timeout:
+                time.sleep(0.1)
+                FileServer.debug('Timed out; will send NAK packets for missing frames')
+                pkt_nums = set(pkt.seq_num for pkt in self.threads[threading.current_thread()]['WNDW_RECV'])
+                nak_nums = seq_nums - pkt_nums
+                for nak_num in nak_nums:
+                    self.send_nak(nak_num, client)
+
+        return pkts
+
+    def send_ack(self, seq_num, client):
+        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
+                               seq_num=seq_num,
+                               peer_ip=client[0],
+                               peer_port=client[1],
+                               data='')
+        FileServer.debug('Sending ACK packet #' + str(pkt.seq_num))
+        self.sock.sendto(pkt.to_bytes(), self.router)
+
+    def send_nak(self, seq_num, client):
+        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['NAK'],
+                               seq_num=seq_num,
+                               peer_ip=client[0],
+                               peer_port=client[1],
+                               data='')
+        FileServer.debug('Sending NAK packet #' + str(pkt.seq_num))
+        self.sock.sendto(pkt.to_bytes(), self.router)
+
+    @staticmethod
+    def make_pkts(client, resp):
+        pkts = list()
+        seq_num = 0
+        buffer = ''
+        left_to_send = Response.to_str(resp)
+        num_pkts = math.ceil(len(left_to_send) / (packet.PKT_MAX - packet.PKT_MIN))
+        FileServer.debug('Preparing ' + str(num_pkts + 1) + ' packet(s) to send')
+
+        while len(left_to_send) > 0:
+            for char in left_to_send:
+                if len(buffer) < (packet.PKT_MAX - packet.PKT_MIN):
+                    buffer += char
+
+            pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
+                                   seq_num=seq_num,
+                                   peer_ip=client[0],
+                                   peer_port=client[1],
+                                   data=buffer)
+            pkts.append(pkt)
+            seq_num += 1
+            left_to_send = left_to_send[len(buffer):]
+            buffer = ''
+
+        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
+                               seq_num=seq_num,
+                               peer_ip=client[0],
+                               peer_port=client[1],
+                               data='/ END OF TRANSMISSION /')
+        pkts.append(pkt)
+
+        return pkts
+
+    def send_data(self, pkts):
+        last_pkt = pkts[-1]
+
+        while len(pkts) > 0:
+            window_ready = False
+
+            while not window_ready:
+                pkt = pkts.pop(0)
+                self.threads[threading.current_thread()]['WNDW_SEND'].append(pkt)
+                if len(pkts) == 0 or len(self.threads[threading.current_thread()]['WNDW_SEND']) == WINDOW_SIZE:
+                    window_ready = True
+
+            for pkt in self.threads[threading.current_thread()]['WNDW_SEND']:
+                FileServer.debug('Sending DATA packet #' + str(pkt.seq_num))
+                self.sock.sendto(pkt.to_bytes(), self.router)
+                time.sleep(0.1)
+            FileServer.debug('Window sent, waiting for ACK packets')
+            received = False
+
+            while not received:
+                acks = self.recv_acks(last_pkt)
+                ack_nums = set(ack.seq_num for ack in acks)\
+                    if acks is not None else set()
+                pkt_nums = set(pkt.seq_num for pkt in self.threads[threading.current_thread()]['WNDW_SEND'])\
+                    if len(self.threads[threading.current_thread()]['WNDW_SEND']) > 0 else set()
+                matches = ack_nums & pkt_nums
+                resend = list()
+                if matches is None:
+                    resend = self.threads[threading.current_thread()]['WNDW_SEND']
+                elif matches == pkt_nums:
+                    received = True
+                    FileServer.debug('Sending window received, sliding down')
+                    self.threads[threading.current_thread()]['WNDW_SEND'].clear()
+                else:
+                    resend = [pkt for pkt in self.threads[threading.current_thread()]['WNDW_SEND'] if pkt.seq_num not in matches]
+
+                if len(resend) > 0:
+                    for pkt in resend:
+                        FileServer.debug('Resending DATA packet #' + str(pkt.seq_num))
+                        self.sock.sendto(pkt.to_bytes(), self.router)
+                        time.sleep(0.1)
+                    resend.clear()
+
+    def recv_acks(self, last_pkt):
+        acks = list()
+        pkt_nums = set(pkt.seq_num for pkt in self.threads[threading.current_thread()]['WNDW_SEND'])
+        self.sock.settimeout(SOCK_TIMEOUT)
 
         try:
-            # Check packet sequence number
-            if seq_num == self.threads[threading.current_thread()]['CURR_RECV']:
+            while len(acks) < WINDOW_SIZE:
+                raw, origin = self.sock.recvfrom(BUFFER_SIZE)
+                ack = packet.UDPPacket.from_bytes(raw)
+                if ack.pkt_type == packet.PKT_TYPE['ACK']:
+                    FileServer.debug('Received ACK packet #' + str(ack.seq_num))
+                    acks.append(ack)
 
-                # Address SYN packet
-                if pkt_type == packet.PKT_TYPE['SYN']:
-                    FileServer.debug('Handshake initiated')
-                    # Add received packet to receiving window
-                    if pkt not in self.threads[threading.current_thread()]['WNDW_RECV']:
-                        self.threads[threading.current_thread()]['WNDW_RECV'].append(pkt)
-                    self.send_synack(origin, dest)
+                    ack_nums = set(ack.seq_num for ack in acks)
+                    matches = ack_nums & pkt_nums
+                    if matches == pkt_nums:
+                        return acks
 
-                # Address ACK packet
-                elif pkt_type == packet.PKT_TYPE['ACK']:
-                    FileServer.debug('Handshake complete')
-                    self.threads[threading.current_thread()]['CURR_RECV'] += packet.PKT_MIN
+                elif ack.pkt_type == packet.PKT_TYPE['NAK']:
+                    if max(pkt.seq_num for pkt in self.threads[threading.current_thread()]['WNDW_SEND']) < ack.seq_num\
+                            < last_pkt.seq_num:
+                        FileServer.debug('Received NAK packet #' + str(ack.seq_num) + '; will slide down window')
+                        acks = list()
+                        for pkt in self.threads[threading.current_thread()]['WNDW_SEND']:
+                            acks.append(packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
+                                                         seq_num=pkt.seq_num,
+                                                         peer_ip=ack.peer_ip,
+                                                         peer_port=ack.peer_port,
+                                                         data=''))
+                        return acks
 
-                    # Add received packet to receiving window
-                    if pkt not in self.threads[threading.current_thread()]['WNDW_RECV']:
-                        self.threads[threading.current_thread()]['WNDW_RECV'].append(pkt)
-
-                    # Older packets can be safely removed from sending window
-                    for pkt_send in self.threads[threading.current_thread()]['WNDW_SEND']:
-                        if pkt_send.seq_num < seq_num:
-                            self.threads[threading.current_thread()]['WNDW_SEND'].remove(pkt_send)
-
-                # Address DATA packet and parse client request
-                elif pkt_type == packet.PKT_TYPE['DATA']:
-                    self.threads[threading.current_thread()]['CURR_SEND'] = seq_num + packet.PKT_MIN + len(data)
-
-                    # Add received packet to receiving window
-                    if pkt not in self.threads[threading.current_thread()]['WNDW_RECV']:
-                        self.threads[threading.current_thread()]['WNDW_RECV'].append(pkt)
-
-                    # Remove handshake ACK packet from receiving window
-                    self.threads[threading.current_thread()]['WNDW_RECV'].remove(self.pkt_recv(3 * packet.PKT_MIN))
-                    self.parse(origin, dest, data)
-
-                # Reject all other packet types
-                else:
-                    FileServer.debug('Unexpected packet type; packet dropped')
-
-            else:
-                if pkt_type == packet.PKT_TYPE['ACK']:
-
-                    # If the sequence number is lower than the last sent packet, resend
-                    if seq_num < max(pkt_send.seq_num
-                                     for pkt_send
-                                     in self.threads[threading.current_thread()]['WNDW_SEND']):
-                        FileServer.debug('Received cumulative ACK packet')
-                        for pkt_send in self.threads[threading.current_thread()]['WNDW_SEND']:
-                            if pkt_send.seq_num >= pkt_type:
-                                self.debug('Resending packet #' + str(pkt_send.seq_num))
-                                self.send_resp_pkt(origin, pkt_send)
-
-                            else:
-                                # Older packets can be safely removed from sending window
-                                self.threads[threading.current_thread()]['WNDW_SEND'].remove(pkt)
-
-                    # Otherwise, client properly received packets, safe to close connection
                     else:
-                        if seq_num > 2 * packet.PKT_MIN:
-                            FileServer.debug('Received ACK packet indicating reception, will close connection')
-                            self.close_connection(pkt)
+                        FileServer.debug('Received NAK packet #' + str(ack.seq_num) + '; will resend missing packet')
 
-                # Address NAK packet
-                elif pkt_type == packet.PKT_TYPE['NAK']:
-                    FileServer.debug('Received NAK packet')
-                    self.send_resp_pkt(origin, self.pkt_send(seq_num))
-
-                    # Older packets can be safely removed from sending window
-                    for pkt_send in self.threads[threading.current_thread()]['WNDW_SEND']:
-                        if pkt_send.seq_num < seq_num:
-                            self.threads[threading.current_thread()]['WNDW_SEND'].remove(pkt_send)
-
-                # Otherwise, send ACK of last successfully received, in-order packet
-                else:
-                    # Accept out-of-order DATA packets; reorder them later
-                    if pkt_type == packet.PKT_TYPE['DATA']\
-                            and pkt not in self.threads[threading.current_thread()]['WNDW_RECV']:
-                        self.threads[threading.current_thread()]['WNDW_RECV'].append(pkt)
-                    FileServer.debug('Unexpected sequence number (expected '
-                                     + str(self.threads[threading.current_thread()]['CURR_RECV'])
-                                     + ")")
-                    last = self.last_inorder()
-                    if last is not None:
-                        self.send_ack(origin, dest, last)
-
-            # Receive next packet
-            self.sock.settimeout(SOCK_TIMEOUT)
-            raw, origin = self.sock.recvfrom(BUFFER_SIZE)
-            if raw is not None:
-                pkt = packet.UDPPacket.from_bytes(raw)
-                self.handle(pkt, origin)
-
-        # Handle timeout by asking for packets again
         except socket.timeout:
-            last = self.last_inorder()
-            if last is not None:
-                self.send_ack(origin, dest, last)
-                FileServer.debug('Connection timed out; requesting packets from #'
-                                 + str(last.seq_num))
+            FileServer.debug('Timed out; will resend packets not acknowledged by peer')
+            return acks
 
-                try:
-                    while True:
-                        # Receive client packet(s)
-                        raw, origin = self.sock.recvfrom(BUFFER_SIZE)
-                        if raw is not None:
-                            pkt = packet.UDPPacket.from_bytes(raw)
-                            self.handle(pkt, origin)
-
-                # After second timeout, assume client will not respond anymore
-                except socket.timeout:
-                    FileServer.debug('Connection timed out; assume end of communication')
-
-                    # Clean up thread
-                    peer = (pkt.peer_ip, pkt.peer_port)
-                    self.clients.remove(peer)
-                    self.threads.pop(threading.current_thread())
-
-            else:
-                FileServer.debug('Connection timed out; assume end of communication')
-
-    def send_synack(self, origin, dest):
-        # Generate SYN-ACK packet
-        pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['SYN-ACK'],
-                               seq_num=self.threads[threading.current_thread()]['CURR_SEND'],
-                               peer_ip=dest[0],
-                               peer_port=dest[1],
-                               data='')
-        FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
-
-        # Update expected packet sequence number
-        self.threads[threading.current_thread()]['CURR_RECV'] += 2 * packet.PKT_MIN
-
-        # Send packet
-        self.threads[threading.current_thread()]['WNDW_SEND'].append(pkt)
-        self.sock.sendto(pkt.to_bytes(), origin)
-        FileServer.debug('Packet sent to router at: ' + str(origin[0])
-                         + ':' + str(origin[1])
-                         + ' (size = ' + str(len(pkt.data)) + ')')
-
-    def send_ack(self, origin, dest, last=None):
-        # Generate ACK packet
-        if last is not None:
-            pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['ACK'],
-                                   seq_num=last.seq_num,
-                                   peer_ip=dest[0],
-                                   peer_port=dest[1],
-                                   data='')
-            FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
-
-            # Send packet
-            self.threads[threading.current_thread()]['WNDW_SEND'].append(pkt)
-            self.sock.sendto(pkt.to_bytes(), origin)
-            FileServer.debug('Packet sent to router at: ' + str(origin[0])
-                             + ':' + str(origin[1])
-                             + ' (size = ' + str(len(pkt.data)) + ')')
-
-    def close_connection(self, pkt):
-        # Gracefully close connection after successful transfer
-        FileServer.debug('Closing connection after successful transfer...')
-
-        # Clean up thread
-        peer = (pkt.peer_ip, pkt.peer_port)
-        self.clients.remove(peer)
-        self.threads.pop(threading.current_thread())
-
-    def parse(self, origin, dest, rqst):
+    def parse(self, rqst):
         lines = rqst.split('\r\n')
 
         # Only handle HTTP version 1.1
         if HTTP_VERSION not in lines[0]:
-            FileServer.debug('Handling wrong HTTP request')
-            self.bad_http(origin, dest)
+            return self.bad_http()
 
         path = lines[0].split()[1]
         # Catalog the path as a potential lock
@@ -363,19 +388,17 @@ class FileServer:
         if (path != '/')\
                 and (not path.startswith('/public'))\
                 and (os.path.join(self.cwd, 'public') not in self.wdir):
-            FileServer.debug('Handling forbidden request')
-            self.forbidden(origin, dest)
+
+            return self.forbidden()
 
         elif CMD['GET'] in lines[0]:
-            FileServer.debug('Handling GET request')
-            self.get(origin, dest, rqst)
+            return self.get(rqst=rqst)
 
         elif CMD['POST'] in lines[0]:
-            FileServer.debug('Handling POST request')
-            self.post(origin, dest, rqst)
+            return self.post(rqst=rqst)
 
         else:
-            FileServer.debug('Unrecognized request format: ' + rqst[0])
+            return None
 
     def base_headers(self):
         headers = 'Date: ' + time.asctime(time.localtime()) + '\r\n'
@@ -386,7 +409,7 @@ class FileServer:
 
         return headers
 
-    def bad_http(self, origin, dest):
+    def bad_http(self):
         content = ''
         with open(FILES['BAD_HTTP'], 'r') as file:
             content += file.read()
@@ -394,9 +417,10 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['BAD_HTML'], content, headers)
-        self.send_resp(origin, dest, resp)
 
-    def forbidden(self, origin, dest):
+        return resp
+
+    def forbidden(self):
         content = ''
         with open(FILES['FORBIDDEN'], 'r') as file:
             content += file.read()
@@ -404,9 +428,10 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['FORBIDDEN'], content, headers)
-        self.send_resp(origin, dest, resp)
 
-    def not_allowed(self, origin, dest):
+        return resp
+
+    def not_allowed(self):
         content = ''
         with open(FILES['NOT_ALLOWED'], 'r') as file:
             content += file.read()
@@ -414,9 +439,10 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['NOT_ALLOWED'], content, headers)
-        self.send_resp(origin, dest, resp)
 
-    def not_found(self, origin, dest):
+        return resp
+
+    def not_found(self):
         content = ''
         with open(FILES['NOT_FOUND'], 'r') as file:
             content += file.read()
@@ -424,9 +450,10 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['NOT_FOUND'], content, headers)
-        self.send_resp(origin, dest, resp)
 
-    def stop(self, origin, dest):
+        return resp
+
+    def stop(self):
         content = ''
         with open(FILES['STOP'], 'r') as file:
             content += file.read()
@@ -434,10 +461,8 @@ class FileServer:
         headers += 'Content-Type: text/html' + '\r\n'
         headers += 'Content-Length: ' + str(len(content)) + '\r\n'
         resp = Response(STATUS_CODES['OK'], content, headers)
-        self.send_resp(origin, dest, resp)
 
-        # Interrupt main thread
-        _thread.interrupt_main()
+        return resp
 
     @staticmethod
     def args(args):
@@ -499,7 +524,7 @@ class FileServer:
         else:
             return None
 
-    def get(self, origin, dest, rqst):
+    def get(self, rqst):
         lines = rqst.split('\r\n')
         path = lines[0].split()[1]
 
@@ -510,49 +535,39 @@ class FileServer:
         if path == '/':
             content += json.dumps(self.dir(self.cwd), sort_keys=True, indent=4)
             headers += 'Content-Type: application/json' + '\r\n'
-
-            # Form request and send
             resp = Response(STATUS_CODES['OK'], content, headers)
-            self.send_resp(origin, dest, resp)
+
+            return resp
 
         else:
-            # Check if a query is part of the request
             query_index = path.find('?')
             path_end = query_index if query_index > 0 else len(path)
 
-            # Verify if path is valid, omitting query
             if os.path.isfile(path[1:path_end]):
                 reading = False
                 try:
-                    # Wait until writing threads are done with the file
                     self.locks_write[path].wait()
                     FileServer.debug('No writer threads in file \'' + path + '\'')
 
-                    # Acquire lock to read the file
                     self.locks_read[path] += 1
                     FileServer.debug('Acquired lock to read file \'' + path + '\'')
                     reading = True
 
-                    # Close server if path points to 'public/stop.html'
                     if FILES['STOP'] in path:
                         FileServer.debug('Received stop request')
-                        self.stop(origin, dest)
-                        return
+                        self.stop()
+                        _thread.interrupt_main()
 
-                    # Add query arguments to output
                     args = re.findall('(\w+=\w+)+', path, re.IGNORECASE)
                     if args is not None:
                         content += json.dumps(self.args(args), sort_keys=True, indent=4)
 
-                    # Grab file contents
                     with open(path[1:path_end], 'r') as file:
                         content += file.read() + '\r\n'
 
-                    # Optional busy wait delay to test concurrency
                     time.sleep(self.delay)
 
                 finally:
-                    # Decrement number of readers
                     if reading:
                         self.locks_read[path] -= 1
                         FileServer.debug('Released lock to read from file \'' + path + '\'')
@@ -561,37 +576,29 @@ class FileServer:
                 stats = os.stat(path[1:path_end])
                 mtime = time.asctime(time.localtime(stats[stat.ST_MTIME]))
                 headers += 'Last-Modified: ' + mtime + '\r\n'
-
-                # Determine Content-Type and Content-Disposition headers
                 headers += self.content_type(path) + '\r\n'
                 headers += self.content_disposition(path) + '\r\n'
-
-                # Form request and send
                 headers += 'Content-Length: ' + str(len(content)) + '\r\n'
                 resp = Response(STATUS_CODES['OK'], content, headers)
-                self.send_resp(origin, dest, resp)
+
+                return resp
 
             # If path is not valid, form not found response
             else:
-                self.not_found(origin, dest)
+                return self.not_found()
 
-    def post(self, origin, dest, rqst):
+    def post(self, rqst):
         lines = rqst.split('\r\n')
         path = lines[0].split()[1]
-
         headers = self.base_headers()
 
-        # Deny access to already-existing files (except dummy post.html)
         if any(FILE in path for FILE in FILES.values()):
-            self.not_allowed(origin, dest)
-            return
+            return self.not_allowed()
 
         else:
-            # Grab message body
             body = rqst.split('\r\n\r\n')[1]
             content = ''
 
-            # If Content-Type is JSON, take advantage of pretty formatting
             media_type = re.search('Content-Type:\s*application/json', rqst, re.IGNORECASE)
             if media_type is not None:
                 try:
@@ -601,12 +608,10 @@ class FileServer:
                 except json.JSONDecodeError:
                     pass
 
-            # If not, try to put it into nice JSON format
             else:
                 args = body.split('&')
                 content = json.dumps(self.args(args), sort_keys=True, indent=4)
 
-                # If JSON formatting failed, resort to pure copy-and-paste
                 if content == 'null':
                     content = body
                     headers += 'Content-Type: text/plain' + '\r\n'
@@ -614,93 +619,45 @@ class FileServer:
                     headers += 'Content-Type: application/json' + '\r\n'
 
             try:
-                # Wait until other writing threads are done with the file
                 self.locks_write[path].wait()
                 FileServer.debug('No other writer threads in file \'' + path + '\'')
 
-                # Wait until reader threads are done with the file
                 while self.locks_read[path] > 0:
                     FileServer.debug('Reader thread(s) holding the lock to file \''
                                      + path + '\'')
 
-                # Acquire lock to write to the file
                 self.locks_write[path].clear()
                 FileServer.debug('Acquired lock to write to file \'' + path + '\'')
 
-                # Write contents to file
                 created = False
-
-                # Check if the file already exists
                 path_full = self.wdir + path
                 if not os.path.isfile(path_full):
-                    # Create subdirectories if necessary
                     os.makedirs(os.path.dirname(path_full), exist_ok=True)
                     created = True
                 with open(path_full, 'w') as file:
                     file.write(content)
-
-                # Optional busy wait delay to test concurrency
                 time.sleep(self.delay)
 
             finally:
-                # Release writer's lock
                 if not self.locks_write[path].is_set():
                     self.locks_write[path].set()
                     FileServer.debug('Released lock to write to file \'' + path + '\'')
 
-            # If file had to be created, reply with status 201
             if created:
-                # Form request and send
                 resp = Response(STATUS_CODES['CREATED'], content, headers)
-                self.send_resp(origin, dest, resp)
+                return resp
 
-            # If file already existed, reply with status 200
             else:
-                # Form request and send
                 resp = Response(STATUS_CODES['OK'], content, headers)
-                self.send_resp(origin, dest, resp)
-
-    def send_resp(self, origin, dest, resp):
-        buffer = ''
-        left_to_send = Response.to_str(resp)
-
-        # Determine how many packets need to be sent
-        num_pkts = math.ceil(len(left_to_send) / (packet.PKT_MAX - packet.PKT_MIN))
-        FileServer.debug('Sending ' + str(num_pkts) + ' packet(s)')
-
-        while len(left_to_send) > 0:
-            # Use a buffer to split the request into as many packets as needed
-            for char in left_to_send:
-                if len(buffer) < (packet.PKT_MAX - packet.PKT_MIN):
-                    buffer += char
-
-            pkt = packet.UDPPacket(pkt_type=packet.PKT_TYPE['DATA'],
-                                   seq_num=self.threads[threading.current_thread()]['CURR_SEND'],
-                                   peer_ip=str(dest[0]),
-                                   peer_port=dest[1],
-                                   data=buffer)
-
-            left_to_send = left_to_send[len(buffer):]
-            self.threads[threading.current_thread()]['CURR_SEND'] += packet.PKT_MIN + len(buffer)
-            self.threads[threading.current_thread()]['WNDW_SEND'].append(pkt)
-            FileServer.debug('Built packet:\r\n\r\n' + str(pkt), True)
-            buffer = ''
-
-        # Send window to server
-        for pkt in self.threads[threading.current_thread()]['WNDW_SEND']:
-            self.send_resp_pkt(origin, pkt)
-
-    def send_resp_pkt(self, origin, pkt):
-        # Packet dispatch
-        self.sock.sendto(pkt.to_bytes(), origin)
-        FileServer.debug('Packet sent to router at: ' + str(origin[0])
-                         + ':' + str(origin[1])
-                         + ' (size = ' + str(len(pkt.data)) + ')')
+                return resp
 
     def exit(self):
-        # Make sure all other threads finish processing their requests
-        for t in self.threads:
-            t.join()
+        try:
+            for t in self.threads:
+                t.join()
+                self.threads.pop(t)
+        except RuntimeError:
+            pass
 
         self.sock.close()
         FileServer.debug('Server shut down successfully.')
