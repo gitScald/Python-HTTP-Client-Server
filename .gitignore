@@ -1,8 +1,5 @@
-2manythreads/
 .idea/
 __pycache__/
 ex/
 *.log
 *.pdf
-old1/
-old2/
